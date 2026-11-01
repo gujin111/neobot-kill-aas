@@ -11,7 +11,7 @@ import types
 
 
 # ---------------------------------------------------------------------------
-# 极简 pydantic 桩（只支持本插件用到的 Field 默认值 / default_factory / 形状）
+# 极简 pydantic 桩（只支持本插件用到的 Field 默认值 / default_factory）
 # ---------------------------------------------------------------------------
 
 
@@ -60,52 +60,63 @@ def install_pydantic_stub() -> None:
 # ---------------------------------------------------------------------------
 
 
-class CommandRegistration:
-    def __init__(self, pattern, kwargs):
-        self.pattern = pattern
-        self.kwargs = kwargs
-        head = pattern.split()[0] if pattern.split() else pattern
-        self.name = head
-        self.permission = kwargs.get("permission")
-        self.description = kwargs.get("description", "")
-        self.aliases = tuple(kwargs.get("aliases") or ())
-
-
 class Plugin:
     """记录装饰器注册结果，供断言使用。"""
 
     instances: list["Plugin"] = []
 
-    def __init__(self, name, *, version="0.1.0", description="", usage="", author="",
-                 config=None, dependencies=(), priority=0, hot_reload=True,
-                 config_hot_reload=True, **kwargs):
+    def __init__(
+        self,
+        name,
+        *,
+        version="0.1.0",
+        description="",
+        usage="",
+        author="",
+        config=None,
+        command_prefix="/",
+        dependencies=(),
+        priority=0,
+        min_neobot_version=None,
+        python_dependencies=(),
+        hot_reload=True,
+        config_hot_reload=True,
+        **kwargs,
+    ):
         self.name = name
         self.version = version
         self.description = description
         self.usage = usage
         self.config_model = config
+        self.command_prefix = command_prefix
         self.dependencies = tuple(dependencies)
-        self.commands: list[CommandRegistration] = []
-        self.events: list[dict] = []
+        self.priority = priority
+        self.hot_reload = hot_reload
+        self.config_hot_reload = config_hot_reload
+        #: @plugin.message(...) 注册
+        self.messages: list[dict] = []
+        #: @plugin.command(...) 注册（本插件未使用，保留以便断言「没有用到」）
+        self.commands: list[dict] = []
         self.lifecycle: dict[str, list] = {"load": [], "startup": [], "shutdown": []}
         Plugin.instances.append(self)
 
     # -- 装饰器 -------------------------------------------------------------
-    def command(self, pattern, *, permission=None, description="", aliases=None, **kwargs):
+    def message(self, pattern=None, **kwargs):
         def decorator(func):
-            self.commands.append(
-                CommandRegistration(
-                    pattern,
-                    {"permission": permission, "description": description, "aliases": aliases, **kwargs},
-                )
-            )
+            self.messages.append({"pattern": pattern, "handler": func, **kwargs})
             return func
 
         return decorator
 
-    def event(self, *, post_type=None, **kwargs):
+    def command(self, pattern, **kwargs):
         def decorator(func):
-            self.events.append({"post_type": post_type, "handler": func, **kwargs})
+            self.commands.append({"pattern": pattern, "handler": func, **kwargs})
+            return func
+
+        return decorator
+
+    def event(self, **kwargs):  # 2.0.2 才有；本插件不该使用
+        def decorator(func):
             return func
 
         return decorator
@@ -126,10 +137,13 @@ class Plugin:
     def on_shutdown(self, func):
         return self._lifecycle("shutdown")(func)
 
-    def message(self, *args, **kwargs):  # 未使用，保留形状
-        return self.event(post_type="message")
-
     def tool(self, *args, **kwargs):
+        def decorator(func):
+            return func
+
+        return decorator
+
+    def capability(self, name):
         def decorator(func):
             return func
 

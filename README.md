@@ -6,6 +6,24 @@
 - 插件名：`proactive`（与 NeoBot 官方内置插件不重名）
 - 类型：**第三方插件**，放进 `plugins/` 目录即可，不改 NeoBot 源码
 - 依赖：NeoBot 本体（Python 3.13/3.14）+ `pydantic`（本体已自带）
+- 版本：1.1.0
+
+### 兼容性（重要）
+
+本插件刻意只使用 **neobot-modloader 2.0.1 与 2.0.2 都存在** 的接口，
+因为你实际安装的是 PyPI 上的稳定版 2.0.1，而 2.0.2aX 才新增了几个 API：
+
+| 用途 | 本插件用的（2.0.1 就有） | 没有使用的（2.0.2 才有） |
+|---|---|---|
+| 注册命令 | `ctx.app_commands.register(name, description=, usage=, permission=)` | `@plugin.command(..., permission=...)` |
+| 监听消息 | `@plugin.message(priority=50)` | `@plugin.event(post_type="message")` |
+| 后台循环 | `asyncio.create_task(...)` + `on_shutdown` 里取消 | `ctx.create_task(...)` |
+
+> 1.0.0 版本用了后一列的三个接口，在 2.0.1 上会以
+> `'Plugin' object has no attribute 'event'` 启动失败。1.1.0 已全部替换。
+
+另外注意：`plugin.toml` 里的 `version` 必须与 `Plugin(version=...)` 完全一致，
+否则 modloader 会以「plugin.toml version 与 Plugin(...) version 不一致」拒绝加载。
 
 ---
 
@@ -177,14 +195,28 @@ history_message_limit = 20
 | 项目 | 结果 |
 |---|---|
 | `tests/test_engine.py`（纯逻辑，19 条） | **19/19 通过** |
-| `tests/test_integration.py`（桩 SDK 集成，27 条） | **27/27 通过** |
+| `tests/test_integration.py`（桩 SDK 集成，35 条） | **35/35 通过** |
+| 静态兼容性审计（对照 modloader 2.0.1 源码解析成员表） | **12/12 项 API 全部存在** |
 | `compileall`（全部源文件语法） | 通过 |
 | 状态持久化 | 实测：写入 `state.json` 后重启引擎可恢复 `enabled` 与历史池 |
 
-覆盖到的行为：注册的命令名与权限、规则优先级、空闲触发投递、冷却拦截、工作时间段拦截、
-计数兜底触发、活跃度打分触发、发言策略拒绝时放弃、通知中心缺失时降级到管线、
-会话已有管线时跳过、无服务时回落纯文本、总开关、状态持久化、指令按权限过滤与关键词过滤、
-渲染模块缺失时的安全降级。
+覆盖到的行为：注册的命令名与权限、命令描述与用法、注册器不可用时跳过、规则优先级、
+空闲触发投递、冷却拦截、工作时间段拦截、计数兜底触发、活跃度打分触发、
+发言策略拒绝时放弃、通知中心缺失时降级到管线、会话已有管线时跳过、无服务时回落纯文本、
+总开关、状态持久化、指令按权限过滤与关键词过滤、`/helpimg` 发图与文字降级、
+消息钩子（记录 / 跳过命令与自身消息 / 图片折叠）。
+
+**兼容性审计怎么做的**：`tools/check_compat.py` 直接解析 modloader 的 `plugin.py` 与
+`context.py`，用 AST 取出 `Plugin` 和 `RuntimePluginContext` 的真实成员表，再对照本插件实际用到的
+每个 `plugin.<attr>` / `ctx.<attr>` / `getattr(ctx, "...")`，逐个验证存在性。
+这一步是为了防止再出现「用了只有 2.0.2 才有的接口」这类问题。
+
+```bash
+# 对着你机器上安装的 modloader 检查
+python tools/check_compat.py
+# 或指定某份源码
+python tools/check_compat.py --ref /path/to/neobot_modloader
+```
 
 **没有验证到的部分（必须说明）**：
 
@@ -225,6 +257,8 @@ neobot-kill-aas/           ← 仓库根 = 插件目录，安装后成为 plugin
 ├─ engine.py               ← 纯逻辑：打分/时间窗/模板，不依赖 NeoBot
 ├─ pyproject.toml          ← pytest 配置（开发用）
 ├─ README.md
+├─ tools/
+│  └─ check_compat.py      ← 兼容性审计：对照 modloader 源码逐个验证用到的 API
 └─ tests/
    ├─ stubs.py             ← 测试用最小桩（pydantic + modloader）
    ├─ test_engine.py       ← 纯逻辑测试

@@ -4,10 +4,19 @@
 
 1. **主动发言调度**：移植 koishi-plugin-chatluna-proactive-trigger 的空闲触发与活跃度触发，
    用 NeoBot 宿主服务（notification_hub / reply_orchestrator）把话真正说出去。
-2. **指令图片中心**：``/helpimg`` 把当前所有可用指令渲染成一张图发给用户，按调用者的
-   权限等级过滤；管理类指令全部限定超级管理员（PERM_SUPER_ADMIN）。
+2. **指令图片中心**：``/helpimg`` 把所有可用指令渲染成一张图发给用户，按调用者权限过滤；
+   管理类指令全部限定超级管理员（PERM_SUPER_ADMIN）。
 
-命令统一为 ``/`` + 纯字母，与宿主命令表一致。
+命令统一为 ``/`` + 纯字母，注册进宿主命令表。
+
+兼容性
+------
+本文件刻意只使用 **modloader 2.0.1 与 2.0.2 都存在** 的接口：
+
+* 命令用 ``ctx.app_commands.register(...)``，而不是 2.0.2 才有的
+  ``@plugin.command(permission=...)``；
+* 消息监听用 ``@plugin.message(...)``，而不是 2.0.2 才有的 ``@plugin.event(...)``；
+* 后台循环用 ``asyncio.create_task``，而不是 2.0.2 才有的 ``ctx.create_task``。
 """
 
 from __future__ import annotations
@@ -21,7 +30,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from neobot_modloader import Plugin, Reply
+from neobot_modloader import Plugin
 
 from . import engine
 from .config import GroupRule, PrivateRule, ProactiveConfig
@@ -43,7 +52,7 @@ _PERMISSION_LABELS = {
 
 plugin = Plugin(
     "proactive",
-    version="1.0.0",
+    version="1.1.0",
     description="主动发言调度（空闲 / 活跃度触发）+ 指令图片总览",
     usage="提供 /helpimg 指令图片总览，以及 /proactive 系列主动发言管理指令",
     config=ProactiveConfig,
@@ -57,6 +66,14 @@ plugin = Plugin(
 
 def _permission_label(level: int) -> str:
     return _PERMISSION_LABELS.get(level, f"等级 {level}")
+
+
+def _log_ctx(ctx: Any, level: str, message: str) -> None:
+    logger = getattr(ctx, "logger", None)
+    writer = getattr(logger, level, None) if logger is not None else None
+    text = f"[{PLUGIN_NAME}] {message}"
+    if callable(writer):
+        writer(text)
 
 
 def _extract_text(payload: Any) -> str:
@@ -85,6 +102,31 @@ def _format_dt(moment: datetime) -> tuple[str, str]:
     clock = moment.strftime("%H:%M")
     date = f"{moment.strftime('%Y-%m-%d')} {weekdays[moment.weekday()]}"
     return clock, date
+
+
+def _ctx_field(command_ctx: Any, name: str) -> Any:
+    return getattr(command_ctx, name, None) if command_ctx is not None else None
+
+
+def _ctx_user_id(command_ctx: Any) -> int | None:
+    value = _ctx_field(command_ctx, "user_id")
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _ctx_keyword(command_ctx: Any) -> str:
+    """命令行里 ``/helpimg`` 之后的原文。"""
+    raw = _ctx_field(command_ctx, "raw_args")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    args = _ctx_field(command_ctx, "args")
+    if isinstance(args, (list, tuple)):
+        return " ".join(str(item) for item in args).strip()
+    if isinstance(args, str):
+        return args.strip()
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +170,9 @@ class ProactiveEngine:
         self._dirty = False
         self._load()
 
-    # -- 配置与规则 ---------------------------------------------------------
+    @property
+    def tick_seconds(self) -> int:
+        return max(5, int(self._config.tick_seconds))
 
     @property
     def enabled(self) -> bool:
@@ -173,7 +217,7 @@ class ProactiveEngine:
             state = SessionState(
                 kind=kind,
                 conversation_id=conversation_id,
-                current_threshold=getattr(rule, "activity_lower_limit", 0.85),
+                current_threshold=float(getattr(rule, "activity_lower_limit", 0.85)),
             )
             self._sessions[state.key] = state
         state.timestamps.append(now)
@@ -192,14 +236,15 @@ class ProactiveEngine:
     # -- 触发评估 -----------------------------------------------------------
 
     async def tick(self) -> None:
-        if not self._runtime_enabled:
-            return
-        if not self._sessions:
+        if not self._runtime_enabled or not self._sessions:
             return
         now = time.time()
         moment = datetime.fromtimestamp(now)
         for state in list(self._sessions.values()):
-            if state.failures >= max(1, self._config.max_retry_attempts) and now < state.failure_cooldown_until:
+            if (
+                state.failures >= max(1, self._config.max_retry_attempts)
+                and now < state.failure_cooldown_until
+            ):
                 continue
             try:
                 await self._evaluate(state, now, moment)
@@ -343,7 +388,7 @@ class ProactiveEngine:
                     reasons=[reason],
                 )
                 return True
-            except Exception as exc:  # 发言时段拒绝（SpeechBlocked）或其它异常
+            except Exception as exc:  # 发言策略拒绝（SpeechBlocked）或其它异常
                 if exc.__class__.__name__ == "SpeechBlocked":
                     self._log("info", f"{state.key} 被发言策略拒绝: {exc}")
                     return False
@@ -393,7 +438,7 @@ class ProactiveEngine:
             state = SessionState(
                 kind=kind,
                 conversation_id=conversation_id,
-                current_threshold=getattr(rule, "activity_lower_limit", 0.85),
+                current_threshold=float(getattr(rule, "activity_lower_limit", 0.85)),
             )
             self._sessions[state.key] = state
         moment = datetime.now()
@@ -461,7 +506,9 @@ class ProactiveEngine:
         }
         try:
             self._state_path.parent.mkdir(parents=True, exist_ok=True)
-            self._state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._state_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
             self._dirty = False
         except Exception as exc:
             self._log("warning", f"状态保存失败: {exc}")
@@ -471,13 +518,7 @@ class ProactiveEngine:
     def _log(self, level: str, message: str) -> None:
         if level == "info" and not (self._config.debug_log or self._config.verbose_log):
             return
-        logger = getattr(self._ctx, "logger", None)
-        writer = getattr(logger, level, None) if logger is not None else None
-        text = f"[{PLUGIN_NAME}] {message}"
-        if callable(writer):
-            writer(text)
-        elif logger is not None and hasattr(logger, "info"):
-            logger.info(text)
+        _log_ctx(self._ctx, level, message)
 
     # -- 只读视图，供管理指令使用 -------------------------------------------
 
@@ -487,13 +528,15 @@ class ProactiveEngine:
             f"群聊规则：{len(self._config.groups)} 条，私聊规则：{len(self._config.privates)} 条",
             f"默认模板适用群：{len(self._config.apply_default_group_configs)} 个，"
             f"默认模板适用用户：{len(self._config.apply_default_private_configs)} 个",
-            f"扫描间隔：{self._config.tick_seconds}s，失败冷却：{self._config.failure_cooldown_seconds}s",
+            f"扫描间隔：{self.tick_seconds}s，失败冷却：{self._config.failure_cooldown_seconds}s",
         ]
         if not self._sessions:
             lines.append("当前没有正在跟踪的会话。")
             return lines
         lines.append(f"跟踪中的会话（{len(self._sessions)} 个）：")
-        for state in sorted(self._sessions.values(), key=lambda s: s.last_message_time, reverse=True)[:20]:
+        for state in sorted(
+            self._sessions.values(), key=lambda s: s.last_message_time, reverse=True
+        )[:20]:
             rule = self.rule_for(state.kind, state.conversation_id)
             if rule is None:
                 continue
@@ -503,7 +546,9 @@ class ProactiveEngine:
             if getattr(rule, "enable_idle_trigger", False):
                 active.append("空闲")
             state_text = "/".join(active) if active else "未启用触发"
-            idle_minutes = int((time.time() - state.last_message_time) // 60) if state.last_message_time else -1
+            idle_minutes = (
+                int((time.time() - state.last_message_time) // 60) if state.last_message_time else -1
+            )
             lines.append(
                 f"· {state.key}  [{state_text}]  消息 {len(state.messages)} 条，"
                 f"阈值 {state.current_threshold:.2f}，空闲 {idle_minutes} 分钟"
@@ -529,8 +574,7 @@ def _collect_commands(ctx: Any, user_id: int | None, keyword: str = "") -> list[
     if service is None:
         return []
     try:
-        registry = service.registry
-        commands = list(registry.commands())
+        commands = list(service.registry.commands())
     except Exception:
         return []
     permissions = getattr(service, "permissions", None)
@@ -599,7 +643,9 @@ def _fallback_text(rows: list[dict[str, Any]], title: str) -> str:
     return "\n".join(lines)
 
 
-async def _build_help_image(ctx: Any, rows: list[dict[str, Any]], config: ProactiveConfig) -> bytes | None:
+async def _build_help_image(
+    ctx: Any, rows: list[dict[str, Any]], config: ProactiveConfig
+) -> bytes | None:
     """把指令表渲染成 PNG；渲染不可用时返回 None。"""
     if not rows:
         return None
@@ -634,34 +680,19 @@ async def _build_help_image(ctx: Any, rows: list[dict[str, Any]], config: Proact
     return png
 
 
-async def _send_image(
-    ctx: Any, command_context: Any, reply: Reply | None, png: bytes, filename: str
-) -> bool:
-    service = getattr(command_context, "service", None)
-    kind = str(getattr(command_context, "kind", "") or "")
-    conv_id = str(getattr(command_context, "conv_id", "") or "")
+async def _send_image(ctx: Any, command_ctx: Any, png: bytes, filename: str) -> bool:
+    """优先走宿主命令服务的发图通道；不可用时返回 False，由调用方回退文本。"""
+    service = _ctx_field(command_ctx, "service")
+    kind = str(_ctx_field(command_ctx, "kind") or "")
+    conv_id = str(_ctx_field(command_ctx, "conv_id") or "")
     sender = getattr(service, "send_image_bytes", None)
     if callable(sender) and kind and conv_id:
         try:
             if await sender(kind, conv_id, png, filename=filename):
                 return True
         except Exception as exc:
-            _log_ctx(ctx, "warning", f"send_image_bytes 失败，回退 Reply.image: {exc}")
-    if reply is not None:
-        try:
-            await reply.image(data=png, filename=filename)
-            return True
-        except Exception as exc:
-            _log_ctx(ctx, "warning", f"Reply.image 失败: {exc}")
+            _log_ctx(ctx, "warning", f"send_image_bytes 失败，回退文字: {exc}")
     return False
-
-
-def _log_ctx(ctx: Any, level: str, message: str) -> None:
-    logger = getattr(ctx, "logger", None)
-    writer = getattr(logger, level, None) if logger is not None else None
-    text = f"[{PLUGIN_NAME}] {message}"
-    if callable(writer):
-        writer(text)
 
 
 # ---------------------------------------------------------------------------
@@ -670,41 +701,140 @@ def _log_ctx(ctx: Any, level: str, message: str) -> None:
 
 
 _engine: ProactiveEngine | None = None
+_tick_task: asyncio.Task | None = None
 
 
 def _current_engine() -> ProactiveEngine | None:
     return _engine
 
 
+async def _tick_loop(ctx: Any, current: ProactiveEngine) -> None:
+    while True:
+        await asyncio.sleep(current.tick_seconds)
+        try:
+            await current.tick()
+            current.save()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log_ctx(ctx, "warning", f"调度轮询异常: {exc}")
+
+
+def _register_commands(ctx: Any, config: ProactiveConfig) -> None:
+    """把 5 条指令注册进宿主命令表（modloader 2.0.1 / 2.0.2 通用写法）。"""
+    registrar = getattr(ctx, "app_commands", None)
+    if registrar is None or not getattr(registrar, "available", True):
+        _log_ctx(ctx, "warning", "宿主命令表不可用，跳过 /helpimg 与 /proactive 系列指令注册")
+        return
+
+    @registrar.register(
+        "helpimg",
+        description="把所有可用指令渲染成图片发给你（可用关键词过滤）",
+        usage="[关键词]",
+        permission=PERM_EVERYONE,
+    )
+    async def _helpimg(command_ctx: Any):
+        if not config.help_image_enabled:
+            return "指令图片功能已被管理员关闭，可使用 /help 查看文本版。"
+        user_id = _ctx_user_id(command_ctx)
+        keyword = _ctx_keyword(command_ctx)
+        rows = _collect_commands(ctx, user_id, keyword)
+        if not rows:
+            return "没有找到可用指令。" if keyword else "当前没有已注册的指令。"
+        if len(rows) > config.help_image_max_rows:
+            rows = rows[: config.help_image_max_rows]
+        png = await _build_help_image(ctx, rows, config)
+        if png is not None and await _send_image(ctx, command_ctx, png, "neobot-commands.png"):
+            return None
+        return _fallback_text(rows, config.help_image_title)
+
+    @registrar.register(
+        "proactive",
+        description="查看主动发言调度状态（超级管理员）",
+        permission=PERM_SUPER_ADMIN,
+    )
+    async def _status(command_ctx: Any):
+        current = _current_engine()
+        if current is None:
+            return "调度器尚未初始化。"
+        return "\n".join(current.status_lines())
+
+    @registrar.register(
+        "proactiveon",
+        description="开启主动发言（超级管理员）",
+        permission=PERM_SUPER_ADMIN,
+    )
+    async def _on(command_ctx: Any):
+        current = _current_engine()
+        if current is None:
+            return "调度器尚未初始化。"
+        current.set_enabled(True)
+        return "主动发言已开启。"
+
+    @registrar.register(
+        "proactiveoff",
+        description="关闭主动发言（超级管理员）",
+        permission=PERM_SUPER_ADMIN,
+    )
+    async def _off(command_ctx: Any):
+        current = _current_engine()
+        if current is None:
+            return "调度器尚未初始化。"
+        current.set_enabled(False)
+        return "主动发言已关闭。"
+
+    @registrar.register(
+        "proactivetest",
+        description="在当前会话立即试触发一次主动发言（超级管理员）",
+        permission=PERM_SUPER_ADMIN,
+    )
+    async def _test(command_ctx: Any):
+        current = _current_engine()
+        if current is None:
+            return "调度器尚未初始化。"
+        kind = str(_ctx_field(command_ctx, "kind") or "")
+        conv_id = str(_ctx_field(command_ctx, "conv_id") or "")
+        if kind not in {"group", "private"} or not conv_id:
+            return "无法确定当前会话，请在群聊或私聊里使用。"
+        return await current.force_trigger(kind, conv_id)
+
+
 @plugin.on_load
 async def _on_load(ctx) -> None:
     global _engine
-    _engine = ProactiveEngine(ctx, ProactiveConfig(**(ctx.config or {})))
+    raw_config = dict(getattr(ctx, "config", None) or {})
+    try:
+        config = ProactiveConfig(**raw_config)
+    except Exception as exc:
+        _log_ctx(ctx, "warning", f"配置解析失败，改用默认值: {exc}")
+        config = ProactiveConfig()
+    _engine = ProactiveEngine(ctx, config)
+    _register_commands(ctx, config)
     _log_ctx(ctx, "info", "主动发言调度已加载")
 
 
 @plugin.on_startup
 async def _on_startup(ctx) -> None:
+    global _tick_task
     current = _current_engine()
     if current is None:
         return
-
-    async def _loop() -> None:
-        while True:
-            await asyncio.sleep(max(5, current._config.tick_seconds))
-            try:
-                await current.tick()
-                current.save()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                _log_ctx(ctx, "warning", f"调度轮询异常: {exc}")
-
-    ctx.create_task(_loop(), name="proactive-tick")
+    if _tick_task is not None and not _tick_task.done():
+        return
+    _tick_task = asyncio.create_task(_tick_loop(ctx, current), name="proactive-tick")
 
 
 @plugin.on_shutdown
 async def _on_shutdown(ctx) -> None:
+    global _tick_task
+    task = _tick_task
+    _tick_task = None
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except BaseException:  # noqa: BLE001 - 关停时一律吞掉，避免阻断卸载
+            pass
     current = _current_engine()
     if current is not None:
         current.save(force=True)
@@ -715,7 +845,7 @@ async def _on_shutdown(ctx) -> None:
 # ---------------------------------------------------------------------------
 
 
-@plugin.event(post_type="message", priority=50)
+@plugin.message(priority=50)
 async def _on_message(ctx, event: dict) -> None:
     current = _current_engine()
     if current is None:
@@ -737,92 +867,3 @@ async def _on_message(ctx, event: dict) -> None:
     sender = raw.get("sender") if isinstance(raw.get("sender"), dict) else {}
     nickname = str(sender.get("card") or sender.get("nickname") or "") or str(user_id or "群友")
     current.record(message_type, str(conversation_id), text, nickname)
-
-
-# ---------------------------------------------------------------------------
-# 指令
-# ---------------------------------------------------------------------------
-
-
-@plugin.command(
-    "helpimg [keyword:rest]",
-    permission=PERM_EVERYONE,
-    description="把所有可用指令以图片形式发给你（可用关键词过滤）",
-    aliases=("指令图",),
-)
-async def _cmd_helpimg(
-    ctx,
-    reply: Reply,
-    command_context,
-    keyword: str | None = None,
-    config: ProactiveConfig | None = None,
-):
-    current_config = config or ProactiveConfig()
-    if not current_config.help_image_enabled:
-        return "指令图片功能已被管理员关闭，可使用 /help 查看文本版。"
-    user_id = getattr(command_context, "user_id", None)
-    rows = _collect_commands(ctx, user_id, keyword or "")
-    if not rows:
-        return "没有找到可用指令。" if keyword else "当前没有已注册的指令。"
-    if len(rows) > current_config.help_image_max_rows:
-        rows = rows[: current_config.help_image_max_rows]
-    png = await _build_help_image(ctx, rows, current_config)
-    if png is None:
-        return _fallback_text(rows, current_config.help_image_title)
-    if await _send_image(ctx, command_context, reply, png, "neobot-commands.png"):
-        return None
-    return _fallback_text(rows, current_config.help_image_title)
-
-
-@plugin.command(
-    "proactive",
-    permission=PERM_SUPER_ADMIN,
-    description="查看主动发言调度状态（超级管理员）",
-)
-async def _cmd_proactive(ctx, reply: Reply):
-    current = _current_engine()
-    if current is None:
-        return "调度器尚未初始化。"
-    return "\n".join(current.status_lines())
-
-
-@plugin.command(
-    "proactiveon",
-    permission=PERM_SUPER_ADMIN,
-    description="开启主动发言（超级管理员）",
-)
-async def _cmd_proactive_on(ctx, reply: Reply):
-    current = _current_engine()
-    if current is None:
-        return "调度器尚未初始化。"
-    current.set_enabled(True)
-    return "主动发言已开启。"
-
-
-@plugin.command(
-    "proactiveoff",
-    permission=PERM_SUPER_ADMIN,
-    description="关闭主动发言（超级管理员）",
-)
-async def _cmd_proactive_off(ctx, reply: Reply):
-    current = _current_engine()
-    if current is None:
-        return "调度器尚未初始化。"
-    current.set_enabled(False)
-    return "主动发言已关闭。"
-
-
-@plugin.command(
-    "proactivetest",
-    permission=PERM_SUPER_ADMIN,
-    description="在当前会话立即试触发一次主动发言（超级管理员）",
-)
-async def _cmd_proactive_test(ctx, reply: Reply, command_context):
-    current = _current_engine()
-    if current is None:
-        return "调度器尚未初始化。"
-    kind = str(getattr(command_context, "kind", "") or "")
-    conv_id = str(getattr(command_context, "conv_id", "") or "")
-    if kind not in {"group", "private"} or not conv_id:
-        return "无法确定当前会话，请在群聊或私聊里使用。"
-    return await current.force_trigger(kind, conv_id)

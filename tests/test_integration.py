@@ -1,6 +1,9 @@
 """插件集成测试：用桩 SDK 真导入插件包，验证注册结果与调度行为。
 
 可直接 `python tests/test_integration.py` 运行，也可由 pytest 收集。
+
+重点：断言插件只使用 **modloader 2.0.1 也存在** 的接口——
+命令走 `ctx.app_commands.register(...)`，消息监听走 `@plugin.message(...)`。
 """
 
 from __future__ import annotations
@@ -60,11 +63,7 @@ def _writable(directory) -> bool:
 
 @contextlib.contextmanager
 def _tmpdir():
-    """优先用系统临时目录；受限环境下回落到工程内的一次性目录。
-
-    受限环境可能：禁止在系统临时目录建目录、建了却不可写、或禁止删除目录。
-    三种情况都探测/兜底，且清理失败不影响测试结论。
-    """
+    """优先用系统临时目录；受限环境（禁止建目录 / 不可写 / 禁止删除）回落到工程内。"""
     handle = None
     try:
         candidate = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -87,7 +86,7 @@ def _tmpdir():
                 handle.cleanup()
             except Exception:
                 pass
-    path = ROOT / ".tmp-tests" / f"case{time.time_ns()}"
+    path = TMP_ROOT / f"case{time.time_ns()}"
     path.mkdir(parents=True, exist_ok=True)
     yield str(path)
 
@@ -166,14 +165,41 @@ class FakeHost:
         self.services = services
 
 
+class FakeRegistrar:
+    """模拟 ctx.app_commands（PluginCommandRegistrar）。"""
+
+    def __init__(self, available: bool = True):
+        self.available = available
+        self.registered: list[dict] = []
+
+    def register(self, name=None, *, prefixed=False, **kwargs):
+        requested = str(kwargs.pop("name", "") or name or "")
+
+        def decorate(handler):
+            self.registered.append(
+                {
+                    "name": requested,
+                    "description": kwargs.get("description", ""),
+                    "usage": kwargs.get("usage", ""),
+                    "permission": kwargs.get("permission", 0),
+                    "aliases": tuple(kwargs.get("aliases") or ()),
+                    "handler": handler,
+                }
+            )
+            return handler
+
+        return decorate
+
+
 class FakeCtx:
-    def __init__(self, data_dir, services):
+    def __init__(self, data_dir, services, app_commands=None, config=None):
         self.data_dir = Path(data_dir)
         self.logger = FakeLogger()
         self.plugin_host = FakeHost(services)
+        self.app_commands = app_commands if app_commands is not None else FakeRegistrar()
+        self.screenshots = None
+        self.config = dict(config or {})
         self.sent: list[tuple[str, int, object]] = []
-        self.tasks: list = []
-        self.config: dict = {}
 
     async def send_group(self, group_id, message):
         self.sent.append(("group", group_id, message))
@@ -182,11 +208,6 @@ class FakeCtx:
     async def send_private(self, user_id, message):
         self.sent.append(("private", user_id, message))
         return {"status": "ok"}
-
-    def create_task(self, coro, name=None):
-        task = asyncio.ensure_future(coro)
-        self.tasks.append(task)
-        return task
 
 
 class FakeCommand:
@@ -226,11 +247,19 @@ class FakeCommandService:
 
 
 class FakeCommandContext:
-    def __init__(self, kind, conv_id, user_id, service):
+    """模拟宿主 neobot_app.commands.model.CommandContext。"""
+
+    def __init__(self, kind, conv_id, user_id, service, raw_args=""):
         self.kind = kind
         self.conv_id = conv_id
         self.user_id = user_id
         self.service = service
+        self.raw_args = raw_args
+        self.args = raw_args.split() if raw_args else []
+        self.sent: list[str] = []
+
+    async def reply(self, text):
+        self.sent.append(text)
 
 
 def _make_config(module, **overrides):
@@ -253,6 +282,27 @@ def _build_engine(module, tmpdir, services, **config_overrides):
     return module.ProactiveEngine(ctx, config), ctx, config
 
 
+async def _bootstrap_async(tmpdir, services=None, **config_overrides):
+    """在已有事件循环里跑插件的 on_load。"""
+    ctx = FakeCtx(tmpdir, services or FakeServices(), config=dict(config_overrides))
+    await MODULE._on_load(ctx)
+    return ctx
+
+
+def _bootstrap(tmpdir, services=None, **config_overrides):
+    """跑一遍插件的 on_load，拿到注册好的命令（同步用例用）。"""
+    ctx = FakeCtx(tmpdir, services or FakeServices(), config=dict(config_overrides))
+    asyncio.run(MODULE._on_load(ctx))
+    return ctx
+
+
+def _registered(ctx, name):
+    for item in ctx.app_commands.registered:
+        if item["name"] == name:
+            return item
+    raise AssertionError(f"未注册命令 {name}，实际: {[i['name'] for i in ctx.app_commands.registered]}")
+
+
 # ---------------------------------------------------------------------------
 # 注册结果
 # ---------------------------------------------------------------------------
@@ -260,27 +310,57 @@ def _build_engine(module, tmpdir, services, **config_overrides):
 
 def test_plugin_identity_and_export():
     assert PLUGIN.name == "proactive"
-    assert PLUGIN.version == "1.0.0"
+    assert PLUGIN.version == "1.1.0"
     assert PLUGIN.config_model.__name__ == "ProactiveConfig"
 
 
+def test_does_not_use_newer_than_2_0_1_decorators():
+    """@plugin.command / @plugin.event 是 2.0.2 才有的，用了会在 2.0.1 上炸。"""
+    assert PLUGIN.commands == [], "不应使用 @plugin.command（2.0.1 没有 permission 参数）"
+    assert len(PLUGIN.messages) == 1, "消息监听应且仅应注册一次"
+
+
 def test_only_letter_slash_commands_are_registered():
-    names = [c.name for c in PLUGIN.commands]
+    with _tmpdir() as tmp:
+        ctx = _bootstrap(tmp)
+    names = [item["name"] for item in ctx.app_commands.registered]
     assert names == ["helpimg", "proactive", "proactiveon", "proactiveoff", "proactivetest"], names
     for name in names:
-        assert name.isalpha(), f"{name} is not pure letters"
+        assert name.isalpha(), f"{name} 不是纯字母"
 
 
 def test_help_image_command_is_public_and_core_commands_are_super_admin_only():
-    perms = {c.name: c.permission for c in PLUGIN.commands}
+    with _tmpdir() as tmp:
+        ctx = _bootstrap(tmp)
+    perms = {item["name"]: item["permission"] for item in ctx.app_commands.registered}
     assert perms["helpimg"] == MODULE.PERM_EVERYONE
     for name in ("proactive", "proactiveon", "proactiveoff", "proactivetest"):
         assert perms[name] == MODULE.PERM_SUPER_ADMIN, name
 
 
-def test_message_recording_hook_is_registered_for_all_messages():
-    assert len(PLUGIN.events) == 1
-    assert PLUGIN.events[0]["post_type"] == "message"
+def test_commands_carry_description_and_usage():
+    with _tmpdir() as tmp:
+        ctx = _bootstrap(tmp)
+    helpimg = _registered(ctx, "helpimg")
+    assert helpimg["description"]
+    assert helpimg["usage"] == "[关键词]"
+
+
+def test_registration_is_skipped_when_registrar_unavailable():
+    with _tmpdir() as tmp:
+        ctx = FakeCtx(tmp, FakeServices(), app_commands=FakeRegistrar(available=False))
+        asyncio.run(MODULE._on_load(ctx))
+    assert ctx.app_commands.registered == []
+    assert any("宿主命令表不可用" in msg for _, msg in ctx.logger.records)
+
+
+def test_message_hook_is_registered_without_filters():
+    registration = PLUGIN.messages[0]
+    assert registration["pattern"] is None
+    # 无 text/contains/keywords/regex 等过滤条件 -> 匹配所有消息
+    for key in ("text", "contains", "keywords", "regex", "startswith", "endswith", "fullmatch"):
+        assert registration.get(key) is None, f"不应设置 {key} 过滤"
+    assert registration.get("priority") == 50
 
 
 def test_lifecycle_hooks_are_registered():
@@ -375,7 +455,9 @@ def test_cooldown_blocks_second_trigger():
                 MODULE,
                 tmp,
                 FakeServices(notification_hub=hub),
-                groups=[_group_rule(MODULE, guild_id="100", enable_idle_trigger=True, cooldown_seconds=3600)],
+                groups=[
+                    _group_rule(MODULE, guild_id="100", enable_idle_trigger=True, cooldown_seconds=3600)
+                ],
             )
             engine.record("group", "100", "anyone here", "Bob")
             state = engine._sessions["group:100"]
@@ -398,7 +480,11 @@ def test_work_hours_block_trigger_outside_window():
                 MODULE,
                 tmp,
                 FakeServices(notification_hub=hub),
-                groups=[_group_rule(MODULE, guild_id="100", enable_idle_trigger=True, work_hours=str(blocked_hour))],
+                groups=[
+                    _group_rule(
+                        MODULE, guild_id="100", enable_idle_trigger=True, work_hours=str(blocked_hour)
+                    )
+                ],
             )
             engine.record("group", "100", "hello", "Bob")
             state = engine._sessions["group:100"]
@@ -417,7 +503,11 @@ def test_activity_message_counter_triggers_without_score():
                 MODULE,
                 tmp,
                 FakeServices(notification_hub=hub),
-                groups=[_group_rule(MODULE, guild_id="100", enable_activity_trigger=True, activity_message_interval=3)],
+                groups=[
+                    _group_rule(
+                        MODULE, guild_id="100", enable_activity_trigger=True, activity_message_interval=3
+                    )
+                ],
             )
             for i in range(3):
                 engine.record("group", "100", f"msg{i}", "Carol")
@@ -569,16 +659,6 @@ def test_disabled_engine_does_nothing():
     asyncio.run(scenario())
 
 
-def test_force_trigger_without_rule_returns_message():
-    async def scenario():
-        with _tmpdir() as tmp:
-            engine, _, _ = _build_engine(MODULE, tmp, FakeServices(), groups=[])
-            result = await engine.force_trigger("group", "999")
-            assert isinstance(result, str) and result
-
-    asyncio.run(scenario())
-
-
 def test_state_persists_enabled_flag_and_sessions():
     with _tmpdir() as tmp:
         hub = FakeNotificationHub()
@@ -599,7 +679,7 @@ def test_state_persists_enabled_flag_and_sessions():
 
 
 # ---------------------------------------------------------------------------
-# 指令图片
+# 指令行为
 # ---------------------------------------------------------------------------
 
 
@@ -612,7 +692,9 @@ def _fake_commands():
 
 
 def test_collect_commands_filters_by_permission():
-    service = FakeCommandService(_fake_commands(), {1001: MODULE.PERM_EVERYONE, 2002: MODULE.PERM_SUPER_ADMIN})
+    service = FakeCommandService(
+        _fake_commands(), {1001: MODULE.PERM_EVERYONE, 2002: MODULE.PERM_SUPER_ADMIN}
+    )
     with _tmpdir() as tmp:
         ctx = FakeCtx(tmp, FakeServices(command_service=service))
         normal = MODULE._collect_commands(ctx, 1001)
@@ -637,8 +719,13 @@ def test_collect_commands_without_service_returns_empty():
 
 def test_command_rows_render_expected_labels_and_blocks():
     rows = [
-        {"name": "help", "usage": "[command]", "description": "show help",
-         "permission": MODULE.PERM_EVERYONE, "source": ""},
+        {
+            "name": "help",
+            "usage": "[command]",
+            "description": "show help",
+            "permission": MODULE.PERM_EVERYONE,
+            "source": "",
+        },
     ]
     assert MODULE._command_label(rows[0]) == "/help [command]"
     blocks = MODULE._rows_to_blocks(rows, True)
@@ -649,48 +736,35 @@ def test_command_rows_render_expected_labels_and_blocks():
 
 def test_fallback_text_lists_every_command():
     rows = [
-        {"name": "help", "usage": "", "description": "show help",
-         "permission": MODULE.PERM_EVERYONE, "source": ""},
-        {"name": "reload", "usage": "", "description": "reload",
-         "permission": MODULE.PERM_SUPER_ADMIN, "source": "dashboard"},
+        {
+            "name": "help",
+            "usage": "",
+            "description": "show help",
+            "permission": MODULE.PERM_EVERYONE,
+            "source": "",
+        },
+        {
+            "name": "reload",
+            "usage": "",
+            "description": "reload",
+            "permission": MODULE.PERM_SUPER_ADMIN,
+            "source": "dashboard",
+        },
     ]
     text = MODULE._fallback_text(rows, "TITLE")
     assert "/help" in text and "/reload" in text
 
 
-def test_help_image_returns_none_when_renderer_missing():
-    """测试机上没有 neobot_app，渲染模块导入失败时必须安全返回 None。"""
+def test_helpimg_returns_text_fallback_when_renderer_missing():
+    """测试机上没有 neobot_app，渲染模块导入失败时必须安全回退成文字。"""
 
-    async def scenario():
-        with _tmpdir() as tmp:
-            ctx = FakeCtx(tmp, FakeServices())
-            rows = [{"name": "help", "usage": "", "description": "show help",
-                     "permission": 0, "source": ""}]
-            assert await MODULE._build_help_image(ctx, rows, MODULE.ProactiveConfig()) is None
-            assert await MODULE._build_help_image(ctx, [], MODULE.ProactiveConfig()) is None
-
-    asyncio.run(scenario())
-
-
-def test_helpimg_command_falls_back_to_text_without_browser():
     async def scenario():
         with _tmpdir() as tmp:
             service = FakeCommandService(_fake_commands(), {1001: MODULE.PERM_EVERYONE})
-            ctx = FakeCtx(tmp, FakeServices(command_service=service))
-            reply = stubs.Reply()
-            func = None
-            for candidate in vars(MODULE).values():
-                if callable(candidate) and getattr(candidate, "__name__", "") == "_cmd_helpimg":
-                    func = candidate
-            assert func is not None
-            command_context = FakeCommandContext("group", "100", 1001, service)
-            result = await func(
-                ctx=ctx,
-                reply=reply,
-                command_context=command_context,
-                keyword=None,
-                config=MODULE.ProactiveConfig(),
-            )
+            ctx = await _bootstrap_async(tmp, FakeServices(command_service=service))
+            handler = _registered(ctx, "helpimg")["handler"]
+            command_ctx = FakeCommandContext("group", "100", 1001, service)
+            result = await handler(command_ctx)
             assert isinstance(result, str)
             assert "/help" in result and "/mg" in result
             assert "reload" not in result
@@ -698,8 +772,158 @@ def test_helpimg_command_falls_back_to_text_without_browser():
     asyncio.run(scenario())
 
 
+def test_helpimg_honours_keyword_arg():
+    async def scenario():
+        with _tmpdir() as tmp:
+            service = FakeCommandService(_fake_commands(), {2002: MODULE.PERM_SUPER_ADMIN})
+            ctx = await _bootstrap_async(tmp, FakeServices(command_service=service))
+            handler = _registered(ctx, "helpimg")["handler"]
+            command_ctx = FakeCommandContext("group", "100", 2002, service, raw_args="reload")
+            result = await handler(command_ctx)
+            assert isinstance(result, str)
+            assert "/reload" in result
+            assert "/help" not in result
+
+    asyncio.run(scenario())
+
+
+def test_helpimg_returns_none_after_sending_image():
+    async def scenario():
+        with _tmpdir() as tmp:
+            service = FakeCommandService(_fake_commands(), {1001: MODULE.PERM_EVERYONE})
+            ctx = await _bootstrap_async(tmp, FakeServices(command_service=service))
+            handler = _registered(ctx, "helpimg")["handler"]
+            command_ctx = FakeCommandContext("group", "100", 1001, service)
+
+            async def fake_render(ctx_arg, rows, config):
+                return b"PNG"
+
+            original = MODULE._build_help_image
+            MODULE._build_help_image = fake_render
+            try:
+                result = await handler(command_ctx)
+            finally:
+                MODULE._build_help_image = original
+            assert result is None
+            assert len(service.images) == 1
+            assert service.images[0]["kind"] == "group"
+            assert service.images[0]["conv_id"] == "100"
+
+    asyncio.run(scenario())
+
+
+def test_helpimg_disabled_returns_hint():
+    async def scenario():
+        with _tmpdir() as tmp:
+            service = FakeCommandService(_fake_commands(), {1001: MODULE.PERM_EVERYONE})
+            ctx = await _bootstrap_async(
+                tmp, FakeServices(command_service=service), help_image_enabled=False
+            )
+            handler = _registered(ctx, "helpimg")["handler"]
+            result = await handler(FakeCommandContext("group", "100", 1001, service))
+            assert isinstance(result, str) and "关闭" in result
+
+    asyncio.run(scenario())
+
+
+def test_proactive_commands_report_status_and_toggle():
+    async def scenario():
+        with _tmpdir() as tmp:
+            ctx = await _bootstrap_async(tmp, FakeServices(), groups=[])
+            engine = MODULE._current_engine()
+            assert engine is not None
+
+            status = await _registered(ctx, "proactive")["handler"](FakeCommandContext("group", "1", 1, None))
+            assert isinstance(status, str) and "总开关" in status
+
+            await _registered(ctx, "proactiveoff")["handler"](FakeCommandContext("group", "1", 1, None))
+            assert engine.enabled is False
+            await _registered(ctx, "proactiveon")["handler"](FakeCommandContext("group", "1", 1, None))
+            assert engine.enabled is True
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# 消息钩子
+# ---------------------------------------------------------------------------
+
+
+def test_message_hook_records_group_message():
+    async def scenario():
+        with _tmpdir() as tmp:
+            ctx = await _bootstrap_async(
+                tmp, FakeServices(), groups=[_group_rule(MODULE, guild_id="100", enable_idle_trigger=True)]
+            )
+            handler = PLUGIN.messages[0]["handler"]
+            event = {
+                "post_type": "message",
+                "message_type": "group",
+                "group_id": 100,
+                "user_id": 200,
+                "self_id": 999,
+                "sender": {"card": "小明"},
+                "message": [{"type": "text", "data": {"text": "大家好啊"}}],
+            }
+            await handler(ctx=ctx, event=event)
+            engine = MODULE._current_engine()
+            state = engine._sessions["group:100"]
+            assert "小明" in state.messages[0]
+            assert "大家好啊" in state.messages[0]
+
+    asyncio.run(scenario())
+
+
+def test_message_hook_skips_commands_self_and_empty():
+    async def scenario():
+        with _tmpdir() as tmp:
+            ctx = await _bootstrap_async(
+                tmp, FakeServices(), groups=[_group_rule(MODULE, guild_id="100", enable_idle_trigger=True)]
+            )
+            handler = PLUGIN.messages[0]["handler"]
+            base = {"post_type": "message", "message_type": "group", "group_id": 100, "user_id": 200}
+
+            await handler(
+                ctx=ctx,
+                event={**base, "self_id": 999, "message": [{"type": "text", "data": {"text": "/help"}}]},
+            )
+            await handler(
+                ctx=ctx, event={**base, "self_id": 200, "message": [{"type": "text", "data": {"text": "自己"}}]}
+            )
+            engine = MODULE._current_engine()
+            assert engine._sessions.get("group:100") is None
+
+    asyncio.run(scenario())
+
+
+def test_message_hook_counts_image_segments():
+    async def scenario():
+        with _tmpdir() as tmp:
+            ctx = await _bootstrap_async(
+                tmp, FakeServices(), groups=[_group_rule(MODULE, guild_id="100", enable_idle_trigger=True)]
+            )
+            handler = PLUGIN.messages[0]["handler"]
+            await handler(
+                ctx=ctx,
+                event={
+                    "post_type": "message",
+                    "message_type": "group",
+                    "group_id": 100,
+                    "user_id": 200,
+                    "self_id": 999,
+                    "message": [{"type": "image", "data": {}}],
+                },
+            )
+            state = MODULE._current_engine()._sessions["group:100"]
+            assert "[图片]" in state.messages[0]
+
+    asyncio.run(scenario())
+
+
 def _run_all() -> int:
-    tests = [(name, obj) for name, obj in sorted(globals().items()) if name.startswith("test_") and callable(obj)]
+    tests = [
+        (name, obj) for name, obj in sorted(globals().items()) if name.startswith("test_") and callable(obj)
+    ]
     failed = 0
     for name, func in tests:
         try:

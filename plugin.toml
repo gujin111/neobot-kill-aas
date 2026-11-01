@@ -1,5 +1,5 @@
 name = "proactive"
-version = "1.0.0"
+version = "1.1.0"
 description = "主动发言调度（空闲 / 活跃度触发）+ 指令图片总览"
 author = "ported from koishi-plugin-chatluna-proactive-trigger"
 dependencies = []
