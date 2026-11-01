@@ -310,7 +310,7 @@ def _registered(ctx, name):
 
 def test_plugin_identity_and_export():
     assert PLUGIN.name == "proactive"
-    assert PLUGIN.version == "1.2.0"
+    assert PLUGIN.version == "1.2.1"
     assert PLUGIN.config_model.__name__ == "ProactiveConfig"
 
 
@@ -984,6 +984,36 @@ def test_status_lines_surface_config_notes():
             assert "私聊规则：1 条" in text
 
     asyncio.run(scenario())
+
+
+def test_config_accepts_unquoted_qq_number_in_rule():
+    """TOML 里 user_id = 123456789（不带引号）是 int，要能自动转成字符串。"""
+    config, notes = MODULE._build_config({"privates": [{"user_id": 123456789}]})
+    assert len(config.privates) == 1
+    assert config.privates[0].user_id == "123456789"
+    assert config.privates[0].user_id.strip() == "123456789"
+
+
+def test_config_accepts_unquoted_qq_number_as_whole_rule():
+    config, _ = MODULE._build_config({"groups": [987654321]})
+    assert len(config.groups) == 1
+    assert config.groups[0].guild_id == "987654321"
+
+
+def test_apply_default_lists_accept_unquoted_numbers():
+    config, notes = MODULE._build_config(
+        {"apply_default_group_configs": [123456789], "apply_default_private_configs": [987654321]}
+    )
+    assert config.apply_default_group_configs == ["123456789"]
+    assert config.apply_default_private_configs == ["987654321"]
+
+
+def test_apply_default_lists_drop_invalid_items():
+    config, notes = MODULE._build_config(
+        {"apply_default_group_configs": [123456789, None, ""]}
+    )
+    assert config.apply_default_group_configs == ["123456789"]
+    assert any("无效" in note for note in notes)
 
 
 def _run_all() -> int:

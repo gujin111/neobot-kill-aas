@@ -6,7 +6,7 @@
 - 插件名：`proactive`（与 NeoBot 官方内置插件不重名）
 - 类型：**第三方插件**，放进 `plugins/` 目录即可，不改 NeoBot 源码
 - 依赖：NeoBot 本体（Python 3.13/3.14）+ `pydantic`（本体已自带）
-- 版本：1.2.0
+- 版本：1.2.1
 
 ### 兼容性（重要）
 
@@ -221,7 +221,7 @@ privates = ["123456789"]
 | 项目 | 结果 |
 |---|---|
 | `tests/test_engine.py`（纯逻辑，19 条） | **19/19 通过** |
-| `tests/test_integration.py`（桩 SDK 集成，42 条） | **42/42 通过** |
+| `tests/test_integration.py`（桩 SDK 集成，46 条） | **46/46 通过** |
 | 静态兼容性审计（对照 modloader 2.0.1 源码解析成员表） | **12/12 项 API 全部存在** |
 | `compileall`（全部源文件语法） | 通过 |
 | 状态持久化 | 实测：写入 `state.json` 后重启引擎可恢复 `enabled` 与历史池 |

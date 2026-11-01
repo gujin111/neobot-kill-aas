@@ -52,7 +52,7 @@ _PERMISSION_LABELS = {
 
 plugin = Plugin(
     "proactive",
-    version="1.2.0",
+    version="1.2.1",
     description="主动发言调度（空闲 / 活跃度触发）+ 指令图片总览",
     usage="提供 /helpimg 指令图片总览，以及 /proactive 系列主动发言管理指令",
     config=ProactiveConfig,
@@ -134,18 +134,43 @@ def _ctx_keyword(command_ctx: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _coerce_id_list(value: Any, label: str, notes: list[str]) -> list[str]:
+    """把「默认模板适用群 / 适用用户」列表统一成字符串。
+
+    TOML 里 ``apply_default_group_configs = [123456789]``（号码不带引号）会解析成 int，
+    而字段声明是 ``list[str]``；pydantic v2 不会把 int 自动转成 str，整份校验会失败。
+    """
+    if value is None:
+        return []
+    if isinstance(value, (str, int)):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        notes.append(f"{label} 不是列表，已忽略")
+        return []
+    out: list[str] = []
+    dropped = 0
+    for raw in value:
+        if isinstance(raw, (str, int)) and str(raw).strip():
+            out.append(str(raw).strip())
+        else:
+            dropped += 1
+    if dropped:
+        notes.append(f"{label} 有 {dropped} 项无效，已跳过")
+    return out
+
+
 def _coerce_rules(value: Any, model: Any, id_field: str, label: str, notes: list[str]) -> list[Any]:
     """把用户写的规则列表尽量救回来。
 
-    容忍三种写法：字典、模型实例、以及「只写 id」的字符串简写
-    （``privates = ["123456"]`` 这种）。坏条目跳过并记一条提示，
-    绝不让一条坏数据把整份配置打回默认值。
+    容忍这些写法：字典、模型实例、以及「只写 id」的字符串或数字简写
+    （``privates = ["123456"]`` / ``privates = [123456]``）。
+    坏条目跳过并记一条提示，绝不让一条坏数据把整份配置打回默认值。
     """
     items: list[Any] = []
     if value is None:
         return items
-    if isinstance(value, str):
-        notes.append(f"{label} 应该是列表，收到单个字符串，已按一条处理")
+    if isinstance(value, (str, int)):
+        notes.append(f"{label} 应该是列表，收到单个值，已按一条处理")
         value = [value]
     if not isinstance(value, (list, tuple)):
         notes.append(f"{label} 不是列表，已忽略")
@@ -157,8 +182,12 @@ def _coerce_rules(value: Any, model: Any, id_field: str, label: str, notes: list
             items.append(raw)
             continue
         if isinstance(raw, dict):
+            # TOML 里号码常不带引号 -> int；字段声明是 str，这里先转好再校验
+            payload = dict(raw)
+            if isinstance(payload.get(id_field), int):
+                payload[id_field] = str(payload[id_field])
             try:
-                items.append(model(**raw))
+                items.append(model(**payload))
             except Exception:
                 dropped += 1
             continue
@@ -183,6 +212,12 @@ def _build_config(raw: Any) -> tuple[ProactiveConfig, list[str]]:
     )
     privates = _coerce_rules(
         cleaned.pop("privates", []), PrivateRule, "user_id", "私聊规则（privates）", notes
+    )
+    cleaned["apply_default_group_configs"] = _coerce_id_list(
+        cleaned.pop("apply_default_group_configs", []), "默认模板适用群", notes
+    )
+    cleaned["apply_default_private_configs"] = _coerce_id_list(
+        cleaned.pop("apply_default_private_configs", []), "默认模板适用用户", notes
     )
     cleaned["groups"] = groups
     cleaned["privates"] = privates
