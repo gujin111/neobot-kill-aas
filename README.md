@@ -1,0 +1,217 @@
+# proactive · NeoBot 插件
+
+把 Koishi 插件 **`koishi-plugin-chatluna-proactive-trigger` 0.3.18** 的「主动发言」能力移植到
+[NeoBot](https://github.com/SuperQuail/NeoBot)，并加上一个把全部指令渲染成图片的指令中心。
+
+- 插件名：`proactive`（与 NeoBot 官方内置插件不重名）
+- 类型：**第三方插件**，放进 `plugins/` 目录即可，不改 NeoBot 源码
+- 依赖：NeoBot 本体（Python 3.13/3.14）+ `pydantic`（本体已自带）
+
+---
+
+## 一、为什么是重写而不是改造
+
+原包是 Koishi 的 **TypeScript/Node** 插件，NeoBot 是 **Python** 框架，两者没有可复用的代码层：
+Koishi 的 `Service`/`Context`、ChatLuna 的 room 与历史池，在 NeoBot 里都不存在。
+
+所以这是一次**按语义移植**：触发算法（活跃度打分、空闲调度、阈值自适应）原样搬过来，
+而「怎么把话真正说出去」换成 NeoBot 的宿主服务链路。
+
+| 原插件（Koishi + ChatLuna） | 本插件（NeoBot） |
+|---|---|
+| `session.guildId` / `session.userId` | 入站事件 `message_type` + `group_id`/`user_id` |
+| ChatLuna 的 room 与历史池 | 自建会话状态 + `state.json` 持久化 |
+| `session.send()` | `notification_hub.publish()` → `reply_orchestrator` → `ctx.send_group` |
+| Koishi 命令树 | 宿主命令表 `ctx.app_commands`（`/` 前缀、权限等级 0/1/2） |
+| `h.text()` / `h.image()` | `html_card` 卡片 + `Reply.image()` |
+
+原插件里依赖 ChatLuna 才有的部分（每群一个 proactive room、图片本地缓存与 `[图片:hash]` 标记）
+在 NeoBot 上没有对应概念，未移植，见文末「与上游的差异」。
+
+---
+
+## 二、指令
+
+**全部是 `/` + 纯字母**，注册进宿主命令表，因此 `/help` 会列出它们、权限由宿主统一判定。
+
+| 指令 | 权限 | 说明 |
+|---|---|---|
+| `/helpimg [关键词]` | 所有人 | 把**当前你可用**的全部指令渲染成一张图片发给你；带关键词则过滤 |
+| `/proactive` | 超级管理员 | 查看调度状态：总开关、规则数、跟踪中的会话、各自阈值与空闲时长 |
+| `/proactiveon` | 超级管理员 | 打开主动发言总开关（立刻写盘） |
+| `/proactiveoff` | 超级管理员 | 关闭主动发言总开关 |
+| `/proactivetest` | 超级管理员 | 在当前会话**立即**试触发一次，用来验证回复通道是否通 |
+
+### `/helpimg` 的取数链路
+
+```
+command_service.registry.commands()      ← 宿主里所有已注册命令
+   → command_service.permissions.can(uid, level)   ← 按调用者权限过滤
+   → render_card_html(blocks=[rows...])            ← NeoBot 自带的卡片 DSL
+   → render_card_image(html, screenshots=ctx.screenshots)  ← PNG bytes
+   → command_service.send_image_bytes(...) / Reply.image(...)
+   → 失败则回退成纯文本清单
+```
+
+要点：
+
+- **按权限过滤**：普通用户看不到 `/reload` 这类超管指令，超级管理员能看到全部；
+- **渲染失败自动降级**：没有 Chromium、`screenshots` 未注入、卡片模块导入失败，
+  都会返回一份信息等价的文字清单，不会静默失败；
+- 表格用宿主 `/help` 同款 `variant="commands"` 样式，三列：指令 / 说明 / 权限·来源。
+
+---
+
+## 三、主动发言
+
+### 三个触发来源
+
+| 触发 | 条件 | 适用 |
+|---|---|---|
+| **空闲触发** | 距最后一条消息（或上次触发）超过 `idle_interval_minutes` | 群聊冷场补位、私聊自然开场 |
+| **活跃度触发** | 多时间窗口消息密度打分 ≥ 当前阈值 | 群里聊得热闹时自然接话 |
+| **计数兜底** | 攒够 `activity_message_interval` 条消息 | 分数没到也保证不沉默 |
+
+此外还有**保底触发** `guaranteed_trigger_minutes`：超过这么久没触发过就强制来一次。
+
+### 活跃度打分（与上游同一套参数）
+
+三个窗口的消息速率 → 两条 logistic 曲线加权 → 突发加成 → 新鲜度衰减：
+
+```
+recent 90s 窗口 × 0.65 + instant 20s 窗口 × 0.35
+突发（30s 内 >12 条/分）额外 +0.25
+再乘新鲜度系数 0.55 + 0.45 × exp(-距今/60s · ln2)
+最终 clamp 到 0~1
+```
+
+**阈值自适应**：`activity_lower_limit` 与 `activity_upper_limit`
+- 两者相等 → 固定阈值
+- 下限 < 上限 → 每次触发后阈值升高（**越聊越克制**）
+- 下限 > 上限 → 每次触发后阈值降低（**越聊越积极**）
+
+### 话怎么说出去
+
+三级链路，任意一级失败自动降级：
+
+1. `notification_hub.publish(...)` —— 首选，会先过 NeoBot 的发言策略（发言时段/静默）；
+2. `reply_orchestrator.start_background_reply(...)` —— 通知中心不可用或会话已有活跃管线时跳过；
+3. `ctx.send_group()/send_private()` —— 最后兜底，直接发一条纯文本。
+
+> **注意**：`ctx.agent_reply()` **不能**用于定时触发。它只在插件消息处理器的执行期内有效，
+> 在定时器里调用会静默返回 `False`。这是 NeoBot 的既定行为，不是本插件的限制。
+
+---
+
+## 四、安装
+
+1. 把整个 `proactive/` 目录复制到 NeoBot 的插件目录（默认 `./plugins`，由 `plugins.dir` 决定）：
+
+   ```text
+   NeoBot/
+   └─ plugins/
+      └─ proactive/
+         ├─ plugin.toml
+         ├─ __init__.py
+         ├─ config.py
+         └─ engine.py
+   ```
+
+2. 重启 NeoBot（或面板「插件 → 重新扫描」）。
+3. 面板「插件 → proactive」里**启用**插件，然后到「配置」页填群号与触发参数。
+4. 群里发 `/helpimg` 验证；用 `/proactivetest` 验证主动发言通道。
+
+### 最小可用配置
+
+```toml
+# plugins_data/proactive/config.toml
+enabled = true
+
+[[groups]]
+guild_id = "123456789"          # 你的群号
+enable_idle_trigger = true
+idle_interval_minutes = 120
+enable_activity_trigger = true
+activity_lower_limit = 0.85
+activity_upper_limit = 0.85
+activity_message_interval = 20
+cooldown_seconds = 30
+history_message_limit = 20
+```
+
+默认模板用法：写一条 `guild_id = "default"` 的规则，再把群号列进
+`apply_default_group_configs`。优先级固定为
+**精确匹配 > 默认模板命中 > 无规则**。
+
+### 模板变量
+
+`activity_prompt_template` / `idle_prompt_template` 支持：
+
+| 变量 | 含义 |
+|---|---|
+| `{history}` | 本轮历史消息（受 `history_message_limit` 限制） |
+| `{time}` / `{date}` | 当前时间 / 年月日与星期 |
+| `{group_name}` | 会话标识（私聊为空） |
+| `{user_name}` | 预留，当前为空 |
+| `{idle_minutes}` | 已空闲分钟数 |
+
+---
+
+## 五、验证情况
+
+| 项目 | 结果 |
+|---|---|
+| `tests/test_engine.py`（纯逻辑，19 条） | **19/19 通过** |
+| `tests/test_integration.py`（桩 SDK 集成，27 条） | **27/27 通过** |
+| `compileall`（全部源文件语法） | 通过 |
+| 状态持久化 | 实测：写入 `state.json` 后重启引擎可恢复 `enabled` 与历史池 |
+
+覆盖到的行为：注册的命令名与权限、规则优先级、空闲触发投递、冷却拦截、工作时间段拦截、
+计数兜底触发、活跃度打分触发、发言策略拒绝时放弃、通知中心缺失时降级到管线、
+会话已有管线时跳过、无服务时回落纯文本、总开关、状态持久化、指令按权限过滤与关键词过滤、
+渲染模块缺失时的安全降级。
+
+**没有验证到的部分（必须说明）**：
+
+- 测试机是 **Python 3.12**，且没有 `uv`，无法运行 NeoBot 官方的 `scripts/plugin_ci.py`
+  （它硬性要求 3.13/3.14），因此**没有官方验收报告**，也没有 `plugin.contract.json`；
+- 没有真实 QQ 账号与 NeoBot 完整运行环境，`/helpimg` 的**实际出图**未在真机验证，
+  只验证了「渲染不可用时安全降级为文本」这条路径；
+- `notification_hub` / `reply_orchestrator` / `command_service` 均按源码签名对接，
+  并用同形状的假对象跑通，但未与真实实例联调。
+
+上线前请按第四节走一遍：先 `/helpimg` 看降级文本是否正常，再 `/proactivetest` 看通道是否通。
+
+---
+
+## 六、与上游的差异
+
+| 上游能力 | 本插件 |
+|---|---|
+| 每群一个 proactive room + 触发后清空 ChatLuna 历史 | 用自建会话池代替（清空消息池、保留阈值） |
+| 图片本地缓存与 `[图片:hash]` 标记 | 只把图片折叠成 `[图片]` 文本占位 |
+| `enableQuoteReplyByMessageId` 注入 `message_id` | 未实现 |
+| 多群/多私聊规则与默认模板 | 完整保留 |
+| 工作时间段（含 `22-2` 跨零点） | 完整保留 |
+| 失败冷却、最大重试次数 | 完整保留 |
+| 空活跃度打分、阈值自适应、保底触发 | 完整保留（同一套参数） |
+
+---
+
+## 七、目录结构
+
+```text
+neobot-plugin-proactive/
+├─ proactive/              ← 整个目录丢进 NeoBot 的 plugins/
+│  ├─ plugin.toml          ← 插件清单与打包默认配置
+│  ├─ __init__.py          ← 插件装配、指令、消息钩子、调度引擎
+│  ├─ config.py            ← pydantic 配置模型（面板据此生成表单）
+│  └─ engine.py            ← 纯逻辑：打分/时间窗/模板，不依赖 NeoBot
+├─ tests/
+│  ├─ stubs.py             ← 测试用最小桩（pydantic + modloader）
+│  ├─ test_engine.py       ← 纯逻辑测试
+│  └─ test_integration.py  ← 集成测试
+└─ README.md
+```
+
+`engine.py` 不 import 任何 NeoBot 模块，所以可以脱离宿主单独跑测试——这是刻意设计的边界。
