@@ -52,7 +52,7 @@ _PERMISSION_LABELS = {
 
 plugin = Plugin(
     "proactive",
-    version="1.1.0",
+    version="1.2.0",
     description="主动发言调度（空闲 / 活跃度触发）+ 指令图片总览",
     usage="提供 /helpimg 指令图片总览，以及 /proactive 系列主动发言管理指令",
     config=ProactiveConfig,
@@ -130,6 +130,83 @@ def _ctx_keyword(command_ctx: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 配置装配（容错）
+# ---------------------------------------------------------------------------
+
+
+def _coerce_rules(value: Any, model: Any, id_field: str, label: str, notes: list[str]) -> list[Any]:
+    """把用户写的规则列表尽量救回来。
+
+    容忍三种写法：字典、模型实例、以及「只写 id」的字符串简写
+    （``privates = ["123456"]`` 这种）。坏条目跳过并记一条提示，
+    绝不让一条坏数据把整份配置打回默认值。
+    """
+    items: list[Any] = []
+    if value is None:
+        return items
+    if isinstance(value, str):
+        notes.append(f"{label} 应该是列表，收到单个字符串，已按一条处理")
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        notes.append(f"{label} 不是列表，已忽略")
+        return items
+
+    dropped = 0
+    for raw in value:
+        if isinstance(raw, model):
+            items.append(raw)
+            continue
+        if isinstance(raw, dict):
+            try:
+                items.append(model(**raw))
+            except Exception:
+                dropped += 1
+            continue
+        if isinstance(raw, (str, int)) and str(raw).strip():
+            try:
+                items.append(model(**{id_field: str(raw).strip()}))
+                continue
+            except Exception:
+                pass
+        dropped += 1
+    if dropped:
+        notes.append(f"{label} 有 {dropped} 条无法解析，已跳过（其余仍然生效）")
+    return items
+
+
+def _build_config(raw: Any) -> tuple[ProactiveConfig, list[str]]:
+    """把宿主给的原始 dict 转成配置模型，尽量保住能用的部分。"""
+    notes: list[str] = []
+    cleaned = dict(raw or {})
+    groups = _coerce_rules(
+        cleaned.pop("groups", []), GroupRule, "guild_id", "群聊规则（groups）", notes
+    )
+    privates = _coerce_rules(
+        cleaned.pop("privates", []), PrivateRule, "user_id", "私聊规则（privates）", notes
+    )
+    cleaned["groups"] = groups
+    cleaned["privates"] = privates
+
+    try:
+        return ProactiveConfig(**cleaned), notes
+    except Exception as exc:
+        notes.append(f"配置整体校验失败，改为逐项回退：{exc}")
+
+    config = ProactiveConfig()
+    for key, value in cleaned.items():
+        if key in {"groups", "privates"}:
+            continue
+        try:
+            probe = ProactiveConfig(**{key: value})
+            setattr(config, key, getattr(probe, key))
+        except Exception as exc:
+            notes.append(f"字段 {key} 无效，已用默认值：{exc}")
+    config.groups = groups
+    config.privates = privates
+    return config, notes
+
+
+# ---------------------------------------------------------------------------
 # 会话状态
 # ---------------------------------------------------------------------------
 
@@ -160,7 +237,7 @@ class SessionState:
 class ProactiveEngine:
     """调度器：记录消息、评估触发条件、把提示词交给宿主回复管线。"""
 
-    def __init__(self, ctx: Any, config: ProactiveConfig) -> None:
+    def __init__(self, ctx: Any, config: ProactiveConfig, notes: list[str] | None = None) -> None:
         self._ctx = ctx
         self._config = config
         self._scorer = engine.ActivityScorer()
@@ -168,6 +245,8 @@ class ProactiveEngine:
         self._runtime_enabled = bool(config.enabled)
         self._state_path: Path = Path(getattr(ctx, "data_dir", Path("."))) / STATE_FILENAME
         self._dirty = False
+        #: 配置装配时发现的问题，会在 /proactive 里回显
+        self.config_notes: list[str] = list(notes or [])
         self._load()
 
     @property
@@ -530,6 +609,10 @@ class ProactiveEngine:
             f"默认模板适用用户：{len(self._config.apply_default_private_configs)} 个",
             f"扫描间隔：{self.tick_seconds}s，失败冷却：{self._config.failure_cooldown_seconds}s",
         ]
+        if self.config_notes:
+            lines.append("")
+            lines.append("配置告警：")
+            lines.extend(f"  ! {note}" for note in self.config_notes)
         if not self._sessions:
             lines.append("当前没有正在跟踪的会话。")
             return lines
@@ -803,12 +886,10 @@ def _register_commands(ctx: Any, config: ProactiveConfig) -> None:
 async def _on_load(ctx) -> None:
     global _engine
     raw_config = dict(getattr(ctx, "config", None) or {})
-    try:
-        config = ProactiveConfig(**raw_config)
-    except Exception as exc:
-        _log_ctx(ctx, "warning", f"配置解析失败，改用默认值: {exc}")
-        config = ProactiveConfig()
-    _engine = ProactiveEngine(ctx, config)
+    config, notes = _build_config(raw_config)
+    for note in notes:
+        _log_ctx(ctx, "warning", f"配置：{note}")
+    _engine = ProactiveEngine(ctx, config, notes=notes)
     _register_commands(ctx, config)
     _log_ctx(ctx, "info", "主动发言调度已加载")
 

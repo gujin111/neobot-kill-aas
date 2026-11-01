@@ -310,7 +310,7 @@ def _registered(ctx, name):
 
 def test_plugin_identity_and_export():
     assert PLUGIN.name == "proactive"
-    assert PLUGIN.version == "1.1.0"
+    assert PLUGIN.version == "1.2.0"
     assert PLUGIN.config_model.__name__ == "ProactiveConfig"
 
 
@@ -916,6 +916,72 @@ def test_message_hook_counts_image_segments():
             )
             state = MODULE._current_engine()._sessions["group:100"]
             assert "[图片]" in state.messages[0]
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# 配置容错（privates.0 / groups.0 写错时不能整份配置崩掉）
+# ---------------------------------------------------------------------------
+
+
+def test_config_accepts_bare_string_rule():
+    """privates = ["123456"] 这种「只写 id」的写法应被救回来。"""
+    config, notes = MODULE._build_config({"privates": ["123456"]})
+    assert len(config.privates) == 1
+    assert config.privates[0].user_id == "123456"
+    assert notes == []
+
+
+def test_config_accepts_bare_string_group():
+    config, _ = MODULE._build_config({"groups": ["987654321"]})
+    assert len(config.groups) == 1
+    assert config.groups[0].guild_id == "987654321"
+
+
+def test_config_skips_junk_entries_but_keeps_valid_ones():
+    config, notes = MODULE._build_config(
+        {"privates": [None, 42, "keep-me", {"user_id": "explicit"}]}
+    )
+    ids = [rule.user_id for rule in config.privates]
+    assert "keep-me" in ids and "explicit" in ids
+    assert any("无法解析" in note for note in notes)
+
+
+def test_config_single_string_instead_of_list():
+    config, notes = MODULE._build_config({"privates": "123456"})
+    assert len(config.privates) == 1
+    assert any("应该是列表" in note for note in notes)
+
+
+def test_config_non_list_is_ignored_with_note():
+    config, notes = MODULE._build_config({"privates": {"user_id": "x"}})
+    assert config.privates == []
+    assert any("不是列表" in note for note in notes)
+
+
+def test_bad_privates_does_not_discard_groups():
+    """一条坏私聊规则不能把群聊配置一起打回默认值。"""
+    config, _ = MODULE._build_config(
+        {
+            "groups": [{"guild_id": "100", "enable_idle_trigger": True}],
+            "privates": ["not-a-dict-either-but-string-works"],
+            "enabled": True,
+        }
+    )
+    assert len(config.groups) == 1
+    assert config.groups[0].guild_id == "100"
+    assert config.groups[0].enable_idle_trigger is True
+
+
+def test_status_lines_surface_config_notes():
+    async def scenario():
+        with _tmpdir() as tmp:
+            ctx = await _bootstrap_async(tmp, FakeServices(), groups=[], privates=["123"])
+            engine = MODULE._current_engine()
+            text = "\n".join(engine.status_lines())
+            assert "群聊规则：0 条" in text
+            assert "私聊规则：1 条" in text
 
     asyncio.run(scenario())
 

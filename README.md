@@ -6,7 +6,7 @@
 - 插件名：`proactive`（与 NeoBot 官方内置插件不重名）
 - 类型：**第三方插件**，放进 `plugins/` 目录即可，不改 NeoBot 源码
 - 依赖：NeoBot 本体（Python 3.13/3.14）+ `pydantic`（本体已自带）
-- 版本：1.1.0
+- 版本：1.2.0
 
 ### 兼容性（重要）
 
@@ -176,6 +176,32 @@ history_message_limit = 20
 `apply_default_group_configs`。优先级固定为
 **精确匹配 > 默认模板命中 > 无规则**。
 
+### 规则列表的写法（注意 TOML 语法）
+
+`groups` / `privates` 是**对象数组**，每个元素必须是一张表：
+
+```toml
+# ✅ 正确：[[groups]] 每出现一次就是一条规则
+[[groups]]
+guild_id = "123456789"
+enable_idle_trigger = true
+
+[[privates]]
+user_id = "123456789"
+enable_idle_trigger = true
+
+# ❌ 错误：元素是字符串，会报
+#    privates.0 Input should be a valid dictionary or instance of PrivateRule
+privates = ["123456789"]
+```
+
+面板里的「规则列表」控件（`model_list`）会给每条规则渲染独立的小表单，用它添加最省心；
+手写 TOML 时记住 `[[...]]` 是「追加一张表」，`[...] = [...]` 是「赋一个值」，别混。
+
+**容错**：插件不会因为一条坏规则就整体失效——`["123456789"]` 这种只写 id 的简写会被
+当成 `user_id`/`guild_id` 使用；无法解析的条目会被跳过并在日志里提示，
+其余规则照常生效。配置里的问题也会在 `/proactive` 的「配置告警」里回显。
+
 ### 模板变量
 
 `activity_prompt_template` / `idle_prompt_template` 支持：
@@ -195,7 +221,7 @@ history_message_limit = 20
 | 项目 | 结果 |
 |---|---|
 | `tests/test_engine.py`（纯逻辑，19 条） | **19/19 通过** |
-| `tests/test_integration.py`（桩 SDK 集成，35 条） | **35/35 通过** |
+| `tests/test_integration.py`（桩 SDK 集成，42 条） | **42/42 通过** |
 | 静态兼容性审计（对照 modloader 2.0.1 源码解析成员表） | **12/12 项 API 全部存在** |
 | `compileall`（全部源文件语法） | 通过 |
 | 状态持久化 | 实测：写入 `state.json` 后重启引擎可恢复 `enabled` 与历史池 |
