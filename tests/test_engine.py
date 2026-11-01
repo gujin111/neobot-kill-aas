@@ -14,7 +14,7 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 
 # 直接按文件路径加载 engine 模块：绕开包的 __init__.py（那里需要 NeoBot SDK）
-_spec = importlib.util.spec_from_file_location("proactive_engine", _ROOT / "proactive" / "engine.py")
+_spec = importlib.util.spec_from_file_location("proactive_engine", _ROOT / "engine.py")
 engine = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(engine)
 sys.modules["proactive_engine"] = engine

@@ -26,7 +26,8 @@ stubs.install_modloader_stub()
 
 
 def _load_plugin_module():
-    package_dir = ROOT / "proactive"
+    # 仓库根目录就是插件目录（NeoBot 的安装器只在压缩包第一层找 plugin.toml）
+    package_dir = ROOT
     spec = importlib.util.spec_from_file_location(
         "proactive",
         package_dir / "__init__.py",

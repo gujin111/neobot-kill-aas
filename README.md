@@ -105,21 +105,36 @@ recent 90s 窗口 × 0.65 + instant 20s 窗口 × 0.35
 
 ## 四、安装
 
-1. 把整个 `proactive/` 目录复制到 NeoBot 的插件目录（默认 `./plugins`，由 `plugins.dir` 决定）：
+### 方式一：面板从仓库安装（推荐）
 
-   ```text
-   NeoBot/
-   └─ plugins/
-      └─ proactive/
-         ├─ plugin.toml
-         ├─ __init__.py
-         ├─ config.py
-         └─ engine.py
-   ```
+面板「插件 → 安装」，仓库填 `gujin111/neobot-kill-aas`，分支 `main`，安装后启用。
 
-2. 重启 NeoBot（或面板「插件 → 重新扫描」）。
-3. 面板「插件 → proactive」里**启用**插件，然后到「配置」页填群号与触发参数。
-4. 群里发 `/helpimg` 验证；用 `/proactivetest` 验证主动发言通道。
+> 本仓库遵循 NeoBot 的工程惯例：**仓库根目录就是插件目录**（`plugin.toml` 与 `__init__.py` 在根上）。
+> NeoBot 的安装器解压 zipball 后只在**第一层子目录**里找 `plugin.toml`，不递归；
+> 所以插件文件不能藏在 `proactive/` 之类的子目录里，否则会报
+> 「压缩包内未找到插件目录（缺少 plugin.toml）」。
+
+### 方式二：手动复制
+
+把仓库内容放进 NeoBot 的插件目录（默认 `./plugins`，由 `plugins.dir` 决定），目录名用 `proactive`：
+
+```text
+NeoBot/
+└─ plugins/
+   └─ proactive/
+      ├─ plugin.toml
+      ├─ __init__.py
+      ├─ config.py
+      └─ engine.py
+```
+
+只需要这四个文件；`tests/`、`pyproject.toml`、`README.md` 是开发用的，可以不拷。
+
+### 之后
+
+1. 重启 NeoBot（或面板「插件 → 重新扫描」）。
+2. 面板「插件 → proactive」里**启用**插件，然后到「配置」页填群号与触发参数。
+3. 群里发 `/helpimg` 验证；用 `/proactivetest` 验证主动发言通道。
 
 ### 最小可用配置
 
@@ -200,18 +215,20 @@ history_message_limit = 20
 
 ## 七、目录结构
 
+仓库根目录**就是插件目录**（与 NeoBot SDK `init` 生成的工程一致）：
+
 ```text
-neobot-plugin-proactive/
-├─ proactive/              ← 整个目录丢进 NeoBot 的 plugins/
-│  ├─ plugin.toml          ← 插件清单与打包默认配置
-│  ├─ __init__.py          ← 插件装配、指令、消息钩子、调度引擎
-│  ├─ config.py            ← pydantic 配置模型（面板据此生成表单）
-│  └─ engine.py            ← 纯逻辑：打分/时间窗/模板，不依赖 NeoBot
-├─ tests/
-│  ├─ stubs.py             ← 测试用最小桩（pydantic + modloader）
-│  ├─ test_engine.py       ← 纯逻辑测试
-│  └─ test_integration.py  ← 集成测试
-└─ README.md
+neobot-kill-aas/           ← 仓库根 = 插件目录，安装后成为 plugins/proactive/
+├─ plugin.toml             ← 插件清单与打包默认配置
+├─ __init__.py             ← 插件装配、指令、消息钩子、调度引擎
+├─ config.py               ← pydantic 配置模型（面板据此生成表单）
+├─ engine.py               ← 纯逻辑：打分/时间窗/模板，不依赖 NeoBot
+├─ pyproject.toml          ← pytest 配置（开发用）
+├─ README.md
+└─ tests/
+   ├─ stubs.py             ← 测试用最小桩（pydantic + modloader）
+   ├─ test_engine.py       ← 纯逻辑测试
+   └─ test_integration.py  ← 集成测试
 ```
 
 `engine.py` 不 import 任何 NeoBot 模块，所以可以脱离宿主单独跑测试——这是刻意设计的边界。
