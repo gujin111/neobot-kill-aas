@@ -33,7 +33,13 @@ from typing import Any
 from neobot_modloader import Plugin
 
 from . import engine
-from .config import GroupRule, PrivateRule, ProactiveConfig
+from .config import (
+    GroupRule,
+    PrivateRule,
+    ProactiveConfig,
+    normalize_id_list,
+    normalize_rule_list,
+)
 
 PLUGIN_NAME = "proactive"
 STATE_FILENAME = "state.json"
@@ -52,7 +58,7 @@ _PERMISSION_LABELS = {
 
 plugin = Plugin(
     "proactive",
-    version="1.3.0",
+    version="1.3.1",
     description="主动发言调度（空闲 / 活跃度触发）+ 指令图片总览",
     usage="提供 /helpimg 指令图片总览，以及 /proactive 系列主动发言管理指令",
     config=ProactiveConfig,
@@ -135,69 +141,38 @@ def _ctx_keyword(command_ctx: Any) -> str:
 
 
 def _coerce_id_list(value: Any, label: str, notes: list[str]) -> list[str]:
-    """把「默认模板适用群 / 适用用户」列表统一成字符串。
+    """把「默认模板适用群 / 适用用户」列表统一成字符串（附告警）。
 
-    TOML 里 ``apply_default_group_configs = [123456789]``（号码不带引号）会解析成 int，
-    而字段声明是 ``list[str]``；pydantic v2 不会把 int 自动转成 str，整份校验会失败。
+    规范化逻辑在 ``config.normalize_id_list``，面板保存与插件加载共用同一份。
     """
-    if value is None:
-        return []
-    if isinstance(value, (str, int)):
-        value = [value]
-    if not isinstance(value, (list, tuple)):
+    if value is not None and not isinstance(value, (list, tuple, str, int)):
         notes.append(f"{label} 不是列表，已忽略")
         return []
-    out: list[str] = []
-    dropped = 0
-    for raw in value:
-        if isinstance(raw, (str, int)) and str(raw).strip():
-            out.append(str(raw).strip())
-        else:
-            dropped += 1
+    items, dropped = normalize_id_list(value)
     if dropped:
         notes.append(f"{label} 有 {dropped} 项无效，已跳过")
-    return out
+    return items
 
 
 def _coerce_rules(value: Any, model: Any, id_field: str, label: str, notes: list[str]) -> list[Any]:
-    """把用户写的规则列表尽量救回来。
+    """把用户写的规则列表尽量救回来，并记下跳过了几条。
 
-    容忍这些写法：字典、模型实例、以及「只写 id」的字符串或数字简写
-    （``privates = ["123456"]`` / ``privates = [123456]``）。
-    坏条目跳过并记一条提示，绝不让一条坏数据把整份配置打回默认值。
+    规范化逻辑在 ``config.normalize_rule_list``（面板保存也用它），
+    这里额外负责构造模型并统计失败条数。
     """
-    items: list[Any] = []
-    if value is None:
-        return items
-    if isinstance(value, (str, int)):
+    if value is not None and isinstance(value, (str, int)):
         notes.append(f"{label} 应该是列表，收到单个值，已按一条处理")
-        value = [value]
-    if not isinstance(value, (list, tuple)):
+    if value is not None and not isinstance(value, (list, tuple, str, int)):
         notes.append(f"{label} 不是列表，已忽略")
-        return items
+        return []
 
-    dropped = 0
-    for raw in value:
-        if isinstance(raw, model):
-            items.append(raw)
-            continue
-        if isinstance(raw, dict):
-            # TOML 里号码常不带引号 -> int；字段声明是 str，这里先转好再校验
-            payload = dict(raw)
-            if isinstance(payload.get(id_field), int):
-                payload[id_field] = str(payload[id_field])
-            try:
-                items.append(model(**payload))
-            except Exception:
-                dropped += 1
-            continue
-        if isinstance(raw, (str, int)) and str(raw).strip():
-            try:
-                items.append(model(**{id_field: str(raw).strip()}))
-                continue
-            except Exception:
-                pass
-        dropped += 1
+    payloads, dropped = normalize_rule_list(value, id_field)
+    items: list[Any] = []
+    for payload in payloads:
+        try:
+            items.append(model(**payload))
+        except Exception:
+            dropped += 1
     if dropped:
         notes.append(f"{label} 有 {dropped} 条无法解析，已跳过（其余仍然生效）")
     return items

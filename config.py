@@ -2,11 +2,74 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Any
+
+from pydantic import BaseModel, Field, field_validator
 
 from .engine import DEFAULT_ACTIVITY_PROMPT, DEFAULT_IDLE_PROMPT
 
 _LIMIT_HISTORY = "历史消息条数上限：同时作为每会话缓存上限与 {history} 最大注入条数"
+
+
+def normalize_rule_list(value: Any, id_field: str) -> tuple[list[dict[str, Any]], int]:
+    """把用户/面板给的规则列表规范成 ``[{...}, ...]``，返回 (列表, 丢弃条数)。
+
+    容忍这些写法：
+    * ``[{"user_id": "123"}]`` —— 标准写法
+    * ``["123"]`` / ``[123]`` —— 只写 id 的简写
+    * 单个值而不是列表 —— 按一条处理
+    * 号码不带引号（TOML 里是 int）—— 自动转成字符串
+
+    这样面板保存（``model_validate``）和插件加载（同一模型）都能接受。
+    """
+    if value is None:
+        return [], 0
+    if isinstance(value, (str, int)):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return [], 1
+
+    items: list[dict[str, Any]] = []
+    dropped = 0
+    for raw in value:
+        if isinstance(raw, BaseModel):
+            items.append(raw.model_dump())
+            continue
+        if isinstance(raw, dict):
+            payload = dict(raw)
+            if isinstance(payload.get(id_field), int):
+                payload[id_field] = str(payload[id_field])
+            items.append(payload)
+            continue
+        # 只写 id 的简写：字符串或正整数（QQ 号/群号不会 <= 0）
+        if isinstance(raw, str) and raw.strip():
+            items.append({id_field: raw.strip()})
+            continue
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+            items.append({id_field: str(raw)})
+            continue
+        dropped += 1
+    return items, dropped
+
+
+def normalize_id_list(value: Any) -> tuple[list[str], int]:
+    """把「默认模板适用群/用户」列表统一成字符串列表。"""
+    if value is None:
+        return [], 0
+    if isinstance(value, (str, int)):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return [], 1
+    out: list[str] = []
+    dropped = 0
+    for raw in value:
+        if isinstance(raw, str) and raw.strip():
+            out.append(raw.strip())
+        elif isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+            out.append(str(raw))
+        else:
+            dropped += 1
+    return out, dropped
 
 
 class GroupRule(BaseModel):
@@ -96,3 +159,25 @@ class ProactiveConfig(BaseModel):
     help_image_width: int = Field(default=900, ge=480, le=1600, description="指令图片宽度（像素）")
     help_image_show_source: bool = Field(default=True, description="在指令图片里显示插件来源标记")
     help_image_max_rows: int = Field(default=200, ge=10, le=500, description="单张图片最多渲染多少条指令")
+
+    # --- 宽松输入 -----------------------------------------------------------
+    # 面板保存走 model_validate，插件加载也走同一套模型；校验前先把宽松写法
+    # 规范化，两处行为才一致（否则面板里填的简写会在保存时被拒）。
+
+    @field_validator("groups", mode="before")
+    @classmethod
+    def _loose_groups(cls, value: Any) -> Any:
+        items, _ = normalize_rule_list(value, "guild_id")
+        return items
+
+    @field_validator("privates", mode="before")
+    @classmethod
+    def _loose_privates(cls, value: Any) -> Any:
+        items, _ = normalize_rule_list(value, "user_id")
+        return items
+
+    @field_validator("apply_default_group_configs", "apply_default_private_configs", mode="before")
+    @classmethod
+    def _loose_ids(cls, value: Any) -> Any:
+        items, _ = normalize_id_list(value)
+        return items

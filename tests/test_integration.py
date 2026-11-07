@@ -310,7 +310,7 @@ def _registered(ctx, name):
 
 def test_plugin_identity_and_export():
     assert PLUGIN.name == "proactive"
-    assert PLUGIN.version == "1.3.0"
+    assert PLUGIN.version == "1.3.1"
     assert PLUGIN.config_model.__name__ == "ProactiveConfig"
 
 
@@ -1024,6 +1024,48 @@ def test_apply_default_lists_drop_invalid_items():
     )
     assert config.apply_default_group_configs == ["123456789"]
     assert any("无效" in note for note in notes)
+
+
+# ---------------------------------------------------------------------------
+# 宽松输入规范化（面板保存与插件加载共用同一份逻辑）
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_rule_list_accepts_string_and_int_shorthand():
+    items, dropped = MODULE.normalize_rule_list(["123456"], "user_id")
+    assert items == [{"user_id": "123456"}] and dropped == 0
+
+    items, dropped = MODULE.normalize_rule_list([123456], "user_id")
+    assert items == [{"user_id": "123456"}] and dropped == 0
+
+
+def test_normalize_rule_list_coerces_int_id_inside_dict():
+    items, _ = MODULE.normalize_rule_list([{"user_id": 123456, "enable_idle_trigger": True}], "user_id")
+    assert items[0]["user_id"] == "123456"
+    assert items[0]["enable_idle_trigger"] is True
+
+
+def test_normalize_rule_list_wraps_scalar():
+    items, _ = MODULE.normalize_rule_list("123456", "guild_id")
+    assert items == [{"guild_id": "123456"}]
+
+
+def test_normalize_rule_list_drops_junk():
+    items, dropped = MODULE.normalize_rule_list([None, "", 0, {"user_id": "ok"}], "user_id")
+    assert items == [{"user_id": "ok"}]
+    assert dropped == 3
+
+
+def test_normalize_rule_list_handles_none_and_non_list():
+    assert MODULE.normalize_rule_list(None, "user_id") == ([], 0)
+    assert MODULE.normalize_rule_list({"a": 1}, "user_id") == ([], 1)
+
+
+def test_normalize_id_list_coerces_and_drops():
+    assert MODULE.normalize_id_list([123456, " 789 "]) == (["123456", "789"], 0)
+    items, dropped = MODULE.normalize_id_list([123456, None, ""])
+    assert items == ["123456"]
+    assert dropped == 2
 
 
 def _run_all() -> int:

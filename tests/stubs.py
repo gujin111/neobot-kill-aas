@@ -26,6 +26,19 @@ def Field(default=None, *, default_factory=None, **meta):  # noqa: N802 - 对齐
     return _FieldInfo(default, default_factory=default_factory, **meta)
 
 
+def field_validator(*fields, mode="after", **kwargs):  # noqa: N802 - 对齐 pydantic 命名
+    """桩：不真的执行校验，原样返回被装饰的对象。
+
+    真实校验（含 mode="before" 的规范化）在 config.py 的 normalize_* 里，
+    由 test_config_normalize 系列用例直接覆盖。
+    """
+
+    def decorator(func):
+        return func
+
+    return decorator
+
+
 class BaseModel:
     def __init__(self, **data):
         fields: dict[str, _FieldInfo] = {}
@@ -52,6 +65,7 @@ def install_pydantic_stub() -> None:
     module = types.ModuleType("pydantic")
     module.BaseModel = BaseModel
     module.Field = Field
+    module.field_validator = field_validator
     sys.modules.setdefault("pydantic", module)
 
 
