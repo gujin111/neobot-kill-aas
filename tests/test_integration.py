@@ -310,8 +310,18 @@ def _registered(ctx, name):
 
 def test_plugin_identity_and_export():
     assert PLUGIN.name == "proactive"
-    assert PLUGIN.version == "1.2.1"
+    assert PLUGIN.version == "1.3.0"
     assert PLUGIN.config_model.__name__ == "ProactiveConfig"
+
+
+def test_plugin_toml_version_matches_plugin_object():
+    """两者不一致时 modloader 会拒绝加载，这里提前拦住。"""
+    import re
+
+    text = (ROOT / "plugin.toml").read_text(encoding="utf-8")
+    match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)
+    assert match, "plugin.toml 缺少 version"
+    assert match.group(1) == PLUGIN.version
 
 
 def test_does_not_use_newer_than_2_0_1_decorators():

@@ -6,21 +6,34 @@
 - 插件名：`proactive`（与 NeoBot 官方内置插件不重名）
 - 类型：**第三方插件**，放进 `plugins/` 目录即可，不改 NeoBot 源码
 - 依赖：NeoBot 本体（Python 3.13/3.14）+ `pydantic`（本体已自带）
-- 版本：1.2.1
+- 版本：1.3.0
 
 ### 兼容性（重要）
 
-本插件刻意只使用 **neobot-modloader 2.0.1 与 2.0.2 都存在** 的接口，
-因为你实际安装的是 PyPI 上的稳定版 2.0.1，而 2.0.2aX 才新增了几个 API：
+只使用**跨版本都存在**的接口，因此同一份代码在 2.0.1 与 2.1.0a3 上都能跑：
 
-| 用途 | 本插件用的（2.0.1 就有） | 没有使用的（2.0.2 才有） |
+| 用途 | 本插件用的 | 没有使用的（仅高版本有） |
 |---|---|---|
 | 注册命令 | `ctx.app_commands.register(name, description=, usage=, permission=)` | `@plugin.command(..., permission=...)` |
 | 监听消息 | `@plugin.message(priority=50)` | `@plugin.event(post_type="message")` |
 | 后台循环 | `asyncio.create_task(...)` + `on_shutdown` 里取消 | `ctx.create_task(...)` |
 
-> 1.0.0 版本用了后一列的三个接口，在 2.0.1 上会以
-> `'Plugin' object has no attribute 'event'` 启动失败。1.1.0 已全部替换。
+> 1.0.0 用了后一列的三个接口，在 modloader 2.0.1 上会以
+> `'Plugin' object has no attribute 'event'` 启动失败。1.1.0 起全部替换。
+
+| modloader 版本 | 结论 | 依据 |
+|---|---|---|
+| 2.0.1（PyPI 稳定版） | ✅ 通过 | `tools/check_compat.py` 12 项 API 全部存在 |
+| 2.1.0a3（最新预发布） | ✅ 通过，**无需改代码** | 同上；另加 app 侧契约审计 |
+| 2.1.0a3 的 app 侧 | ✅ 通过 | `CommandContext` 字段、`send_image_bytes`、`render_card_*`、宿主服务名均未变 |
+
+2.1.0a3 相对 2.0.1 的差异只影响“能不能用新写法”，不影响本插件：
+
+- `Plugin` 新增 `event / action / resource / guide / view / surface`（只增不减）
+- `RuntimePluginContext` 成员数不变
+- 依赖注入的约定名、消息匹配逻辑均未变；`_injected_value` 只是**新增**了两种注入
+- `plugin.contract.json` / `[sdk]` **不在加载路径里**，loader 仍只读 `plugin.toml` 的
+  `enabled` / `priority` / `[config]`
 
 另外注意：`plugin.toml` 里的 `version` 必须与 `Plugin(version=...)` 完全一致，
 否则 modloader 会以「plugin.toml version 与 Plugin(...) version 不一致」拒绝加载。
@@ -221,8 +234,9 @@ privates = ["123456789"]
 | 项目 | 结果 |
 |---|---|
 | `tests/test_engine.py`（纯逻辑，19 条） | **19/19 通过** |
-| `tests/test_integration.py`（桩 SDK 集成，46 条） | **46/46 通过** |
-| 静态兼容性审计（对照 modloader 2.0.1 源码解析成员表） | **12/12 项 API 全部存在** |
+| `tests/test_integration.py`（桩 SDK 集成，47 条） | **47/47 通过** |
+| modloader 侧审计（2.0.1 / 2.1.0a3 双版本） | **12/12 项 API 两个版本都存在** |
+| app 侧审计（2.1.0a3 的 CommandContext / 卡片渲染 / 服务名） | **全部通过** |
 | `compileall`（全部源文件语法） | 通过 |
 | 状态持久化 | 实测：写入 `state.json` 后重启引擎可恢复 `enabled` 与历史池 |
 
@@ -232,22 +246,30 @@ privates = ["123456789"]
 总开关、状态持久化、指令按权限过滤与关键词过滤、`/helpimg` 发图与文字降级、
 消息钩子（记录 / 跳过命令与自身消息 / 图片折叠）。
 
-**兼容性审计怎么做的**：`tools/check_compat.py` 直接解析 modloader 的 `plugin.py` 与
-`context.py`，用 AST 取出 `Plugin` 和 `RuntimePluginContext` 的真实成员表，再对照本插件实际用到的
-每个 `plugin.<attr>` / `ctx.<attr>` / `getattr(ctx, "...")`，逐个验证存在性。
-这一步是为了防止再出现「用了只有 2.0.2 才有的接口」这类问题。
+**兼容性审计怎么做的**：两个脚本，都对着宿主源码做 AST 解析，不靠文档也不靠记忆。
+
+`tools/check_compat.py`（modloader 侧）解析 `plugin.py` 与 `context.py`，取出 `Plugin` 和
+`RuntimePluginContext` 的真实成员表，再对照本插件用到的每个 `plugin.<attr>` /
+`ctx.<attr>` / `getattr(ctx, "...")` 逐个验证存在性。支持一次传多个 `--ref` 做矩阵对比。
+
+`tools/check_host_api.py`（app 侧）固定 `CommandContext` 字段、`CommandService` 方法、
+`Command` 字段、卡片渲染入口和宿主服务名——这些漂了通常只在运行时才炸。
 
 ```bash
-# 对着你机器上安装的 modloader 检查
+# modloader：对着已安装的检查，或对比多个版本
 python tools/check_compat.py
-# 或指定某份源码
-python tools/check_compat.py --ref /path/to/neobot_modloader
+python tools/check_compat.py --ref /path/to/modloader-2.0.1 --ref /path/to/modloader-2.1.0a3
+
+# app：命令上下文 / 卡片渲染 / 宿主服务
+python tools/check_host_api.py --app /path/to/neobot_app
 ```
 
 **没有验证到的部分（必须说明）**：
 
 - 测试机是 **Python 3.12**，且没有 `uv`，无法运行 NeoBot 官方的 `scripts/plugin_ci.py`
   （它硬性要求 3.13/3.14），因此**没有官方验收报告**，也没有 `plugin.contract.json`；
+- 没有把 `neobot_modloader` 真跑起来（它依赖 pydantic / sqlalchemy / httpx 一整条链），
+  所以 2.1.0a3 的适配结论来自**静态契约比对**，不是真机装载；
 - 没有真实 QQ 账号与 NeoBot 完整运行环境，`/helpimg` 的**实际出图**未在真机验证，
   只验证了「渲染不可用时安全降级为文本」这条路径；
 - `notification_hub` / `reply_orchestrator` / `command_service` 均按源码签名对接，
@@ -284,7 +306,8 @@ neobot-kill-aas/           ← 仓库根 = 插件目录，安装后成为 plugin
 ├─ pyproject.toml          ← pytest 配置（开发用）
 ├─ README.md
 ├─ tools/
-│  └─ check_compat.py      ← 兼容性审计：对照 modloader 源码逐个验证用到的 API
+│  ├─ check_compat.py      ← modloader 侧：对照源码验证用到的 API，支持多版本对比
+│  └─ check_host_api.py    ← app 侧：命令上下文 / 卡片渲染 / 宿主服务契约
 └─ tests/
    ├─ stubs.py             ← 测试用最小桩（pydantic + modloader）
    ├─ test_engine.py       ← 纯逻辑测试

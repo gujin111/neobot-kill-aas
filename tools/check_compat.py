@@ -103,10 +103,71 @@ def resolve_ref(explicit: str | None) -> Path | None:
         return None
 
 
+def _ref_version(ref: Path) -> str:
+    """读 modloader 版本号，不 import（避免拖出整条依赖链）。
+
+    优先看同级的 ``*.dist-info/METADATA``（安装态与解包 wheel 都是这个布局），
+    其次找 ``version.py`` 里的 ``__version__`` 常量，最后退回目录名。
+    """
+    import re
+
+    parent = ref.parent
+    for dist_info in sorted(parent.glob("neobot_modloader-*.dist-info")):
+        metadata = dist_info / "METADATA"
+        if metadata.is_file():
+            match = re.search(r"^Version:\s*(.+)$", metadata.read_text(encoding="utf-8"), re.M)
+            if match:
+                return match.group(1).strip()
+    version_py = ref / "version.py"
+    if version_py.is_file():
+        match = re.search(
+            r'__version__\s*=\s*["\']([^"\']+)["\']', version_py.read_text(encoding="utf-8")
+        )
+        if match:
+            return match.group(1)
+    return parent.name or ref.name
+
+
+def audit_one(target: Path, ref: Path, verbose: bool = True) -> tuple[str, int]:
+    """对单个 modloader 版本做审计，返回 (版本号, 不兼容数)。"""
+    version = _ref_version(ref)
+    plugin_members = class_members(ref / "plugin.py", "Plugin")
+    ctx_members = class_members(ref / "context.py", "RuntimePluginContext")
+    uses = collect_uses(target)
+
+    failures = 0
+    detail: list[str] = []
+    for attr in sorted(uses["plugin"]):
+        ok = attr in plugin_members and attr not in KNOWN_NEWER_ONLY
+        note = f"  ← {KNOWN_NEWER_ONLY[attr]}" if attr in KNOWN_NEWER_ONLY else ""
+        detail.append(f"  {'OK  ' if ok else 'MISS'} plugin.{attr}{note}")
+        failures += 0 if ok else 1
+    for attr in sorted(uses["ctx"]):
+        ok = attr in ctx_members
+        detail.append(f"  {'OK  ' if ok else 'MISS'} ctx.{attr}")
+        failures += 0 if ok else 1
+    for name in sorted(uses["getattr"]):
+        ok = name in ctx_members
+        detail.append(f"  {'OK  ' if ok else 'MISS'} getattr(ctx, {name!r})")
+        failures += 0 if ok else 1
+
+    if verbose:
+        print(f"\n===== modloader {version}（Plugin {len(plugin_members)} 成员 / Context {len(ctx_members)} 成员）=====")
+        print("\n".join(detail))
+        print(f"  -> {'全部通过' if failures == 0 else f'{failures} 处不兼容'}")
+
+    return version, failures
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="NeoBot 插件 API 兼容性审计")
     parser.add_argument("--target", default="__init__.py", help="要检查的插件文件")
-    parser.add_argument("--ref", default=None, help="modloader 源码目录（默认用已安装的）")
+    parser.add_argument(
+        "--ref",
+        action="append",
+        default=None,
+        help="modloader 源码目录；可重复传入以对比多个版本（默认用已安装的）",
+    )
     args = parser.parse_args()
 
     target = Path(args.target)
@@ -114,45 +175,34 @@ def main() -> int:
         print(f"找不到目标文件：{target}")
         return 2
 
-    ref = resolve_ref(args.ref)
-    if ref is None or not (ref / "plugin.py").is_file():
-        print("找不到 modloader 源码。请用 --ref 指定含 plugin.py / context.py 的目录。")
-        return 2
+    if args.ref:
+        refs = [Path(item) for item in args.ref]
+        missing = [r for r in refs if not (r / "plugin.py").is_file()]
+        if missing:
+            print("这些目录里没有 plugin.py：")
+            for item in missing:
+                print(f"  {item}")
+            return 2
+    else:
+        single = resolve_ref(None)
+        if single is None or not (single / "plugin.py").is_file():
+            print("找不到 modloader 源码。请用 --ref 指定含 plugin.py / context.py 的目录。")
+            return 2
+        refs = [single]
 
-    plugin_members = class_members(ref / "plugin.py", "Plugin")
-    ctx_members = class_members(ref / "context.py", "RuntimePluginContext")
+    rows: list[tuple[str, int]] = []
+    for ref in refs:
+        rows.append(audit_one(target, ref, verbose=True))
 
-    try:
-        from neobot_modloader.version import __version__ as ref_version  # type: ignore
-    except Exception:
-        ref_version = "未知"
-    print(f"参照 modloader：{ref}（版本 {ref_version}）")
-    print(f"  Plugin 成员 {len(plugin_members)} 个 · RuntimePluginContext 成员 {len(ctx_members)} 个\n")
+    if len(rows) > 1:
+        print("\n===== 汇总 =====")
+        print(f"  {'版本':<14}{'结果'}")
+        for version, failures in rows:
+            print(f"  {version:<14}{'通过' if failures == 0 else f'{failures} 处不兼容'}")
 
-    uses = collect_uses(target)
-    failures = 0
-
-    print(f"===== plugin.<attr>（{len(uses['plugin'])} 个）=====")
-    for attr in sorted(uses["plugin"]):
-        ok = attr in plugin_members and attr not in KNOWN_NEWER_ONLY
-        note = f"  ← {KNOWN_NEWER_ONLY[attr]}" if attr in KNOWN_NEWER_ONLY else ""
-        print(f"  {'OK  ' if ok else 'MISS'} plugin.{attr}{note}")
-        failures += 0 if ok else 1
-
-    print(f"\n===== ctx.<attr>（{len(uses['ctx'])} 个）=====")
-    for attr in sorted(uses["ctx"]):
-        ok = attr in ctx_members
-        print(f"  {'OK  ' if ok else 'MISS'} ctx.{attr}")
-        failures += 0 if ok else 1
-
-    print(f'\n===== getattr(ctx, "..." )（{len(uses["getattr"])} 个）=====')
-    for name in sorted(uses["getattr"]):
-        ok = name in ctx_members
-        print(f"  {'OK  ' if ok else 'MISS'} getattr(ctx, {name!r})")
-        failures += 0 if ok else 1
-
-    print(f"\n结论：{'全部通过' if failures == 0 else f'{failures} 处不兼容'}")
-    return 1 if failures else 0
+    total = sum(f for _, f in rows)
+    print(f"\n结论：{'全部通过' if total == 0 else f'{total} 处不兼容'}")
+    return 1 if total else 0
 
 
 if __name__ == "__main__":

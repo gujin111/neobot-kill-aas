@@ -52,7 +52,7 @@ _PERMISSION_LABELS = {
 
 plugin = Plugin(
     "proactive",
-    version="1.2.1",
+    version="1.3.0",
     description="主动发言调度（空闲 / 活跃度触发）+ 指令图片总览",
     usage="提供 /helpimg 指令图片总览，以及 /proactive 系列主动发言管理指令",
     config=ProactiveConfig,
