@@ -1,12 +1,13 @@
 # proactive · NeoBot 插件
 
 把 Koishi 插件 **`koishi-plugin-chatluna-proactive-trigger` 0.3.18** 的「主动发言」能力移植到
-[NeoBot](https://github.com/SuperQuail/NeoBot)，并加上一个把全部指令渲染成图片的指令中心。
+[NeoBot](https://github.com/SuperQuail/NeoBot)：空闲触发与活跃度触发，用宿主服务把话真正说出去。
 
 - 插件名：`proactive`（与 NeoBot 官方内置插件不重名）
 - 类型：**第三方插件**，放进 `plugins/` 目录即可，不改 NeoBot 源码
 - 依赖：NeoBot 本体（Python 3.13/3.14）+ `pydantic`（本体已自带）
 - 版本：1.4.0
+- 历次版本踩到的坑与修法：[CHANGELOG.md](CHANGELOG.md)
 
 ### 兼容性（重要）
 
@@ -307,9 +308,10 @@ neobot-kill-aas/           ← 仓库根 = 插件目录，安装后成为 plugin
 ├─ engine.py               ← 纯逻辑：打分/时间窗/模板，不依赖 NeoBot
 ├─ pyproject.toml          ← pytest 配置（开发用）
 ├─ README.md
+├─ CHANGELOG.md            ← 每个版本踩到的问题与修法
 ├─ tools/
 │  ├─ check_compat.py      ← modloader 侧：对照源码验证用到的 API，支持多版本对比
-│  └─ check_host_api.py    ← app 侧：命令上下文 / 卡片渲染 / 宿主服务契约
+│  └─ check_host_api.py    ← app 侧：命令上下文 / 宿主服务契约
 └─ tests/
    ├─ stubs.py             ← 测试用最小桩（pydantic + modloader）
    ├─ test_engine.py       ← 纯逻辑测试
