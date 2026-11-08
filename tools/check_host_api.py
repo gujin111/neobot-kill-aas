@@ -23,23 +23,10 @@ import ast
 import sys
 from pathlib import Path
 
-#: 插件读取的 CommandContext 字段
-REQUIRED_CONTEXT_FIELDS = {
-    "service",
-    "kind",
-    "conv_id",
-    "user_id",
-    "raw_args",
-    "args",
-}
-#: 插件调用的 CommandService 方法
-REQUIRED_SERVICE_METHODS = {"send_image_bytes", "reply_to"}
-#: 插件使用的卡片渲染入口
-REQUIRED_CARD_EXPORTS = {"render_card_html", "render_card_image"}
+#: 插件从 CommandContext 读的字段
+REQUIRED_CONTEXT_FIELDS = {"service", "kind", "conv_id", "user_id"}
 #: 插件从宿主服务注册表里取的键
-REQUIRED_HOST_SERVICES = {"command_service", "notification_hub", "reply_orchestrator"}
-#: 插件读的 Command 字段
-REQUIRED_COMMAND_FIELDS = {"name", "description", "usage", "permission", "source"}
+REQUIRED_HOST_SERVICES = {"notification_hub", "reply_orchestrator"}
 
 
 def _parse(path: Path) -> ast.Module | None:
@@ -111,25 +98,6 @@ def main() -> int:
     print("===== CommandContext =====")
     fields = _class_fields(_parse(app / "commands" / "model.py"), "CommandContext")
     report("字段齐全", REQUIRED_CONTEXT_FIELDS - fields)
-
-    print("\n===== CommandService =====")
-    methods = _class_methods(_parse(app / "commands" / "service.py"), "CommandService")
-    report("方法齐全", REQUIRED_SERVICE_METHODS - methods)
-
-    print("\n===== Command =====")
-    command_fields = _class_fields(_parse(app / "commands" / "model.py"), "Command")
-    report("字段齐全", REQUIRED_COMMAND_FIELDS - command_fields)
-
-    print("\n===== html_card 渲染入口 =====")
-    facade = _parse(app / "runtime" / "html_card.py")
-    exported: set[str] = set()
-    for node in ast.walk(facade) if facade else []:
-        if isinstance(node, ast.ImportFrom):
-            for alias in node.names:
-                exported.add(alias.asname or alias.name)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            exported.add(node.name)
-    report("render_card_html / render_card_image 可用", REQUIRED_CARD_EXPORTS - exported)
 
     print("\n===== 宿主服务注册 =====")
     boot = app / "bootstrap" / "parts" / "application.py"

@@ -6,7 +6,7 @@
 - 插件名：`proactive`（与 NeoBot 官方内置插件不重名）
 - 类型：**第三方插件**，放进 `plugins/` 目录即可，不改 NeoBot 源码
 - 依赖：NeoBot 本体（Python 3.13/3.14）+ `pydantic`（本体已自带）
-- 版本：1.3.1
+- 版本：1.4.0
 
 ### 兼容性（重要）
 
@@ -67,29 +67,25 @@ Koishi 的 `Service`/`Context`、ChatLuna 的 room 与历史池，在 NeoBot 里
 
 | 指令 | 权限 | 说明 |
 |---|---|---|
-| `/helpimg [关键词]` | 所有人 | 把**当前你可用**的全部指令渲染成一张图片发给你；带关键词则过滤 |
 | `/proactive` | 超级管理员 | 查看调度状态：总开关、规则数、跟踪中的会话、各自阈值与空闲时长 |
 | `/proactiveon` | 超级管理员 | 打开主动发言总开关（立刻写盘） |
 | `/proactiveoff` | 超级管理员 | 关闭主动发言总开关 |
 | `/proactivetest` | 超级管理员 | 在当前会话**立即**试触发一次，用来验证回复通道是否通 |
 
-### `/helpimg` 的取数链路
+### 指令总览只有 `/help` 一个入口
 
-```
-command_service.registry.commands()      ← 宿主里所有已注册命令
-   → command_service.permissions.can(uid, level)   ← 按调用者权限过滤
-   → render_card_html(blocks=[rows...])            ← NeoBot 自带的卡片 DSL
-   → render_card_image(html, screenshots=ctx.screenshots)  ← PNG bytes
-   → command_service.send_image_bytes(...) / Reply.image(...)
-   → 失败则回退成纯文本清单
-```
+本体 `/help` 本来就会遍历 `registry.commands()`、按调用者权限过滤、并给插件命令标上
+`[来源: proactive]`。本插件把命令注册进同一张表，所以 **`/help` 里自然能看到它们**。
 
-要点：
+因此插件**不再自己实现任何帮助入口**（早期版本有个 `/helpimg`，会把指令渲染成图片，
+和 `/help` 干的是同一件事，1.4.0 已删除）。这样做的原因：
 
-- **按权限过滤**：普通用户看不到 `/reload` 这类超管指令，超级管理员能看到全部；
-- **渲染失败自动降级**：没有 Chromium、`screenshots` 未注入、卡片模块导入失败，
-  都会返回一份信息等价的文字清单，不会静默失败；
-- 表格用宿主 `/help` 同款 `variant="commands"` 样式，三列：指令 / 说明 / 权限·来源。
+- 两个入口会各自维护一份"什么是可用指令"的判定，权限/来源标记迟早不一致；
+- `/help` 有分页、缓存、图文与纯文本降级，插件版不可能做得更好；
+- 删掉之后少一条命令、少一套 `html_card` 依赖，面板保存和配置项也跟着简化了。
+
+`/help` 的过滤规则：普通用户只看得到 `permission=所有人` 的命令，
+超级管理员能看到全部（含本插件的 4 条）。
 
 ---
 
@@ -165,7 +161,7 @@ NeoBot/
 
 1. 重启 NeoBot（或面板「插件 → 重新扫描」）。
 2. 面板「插件 → proactive」里**启用**插件，然后到「配置」页填群号与触发参数。
-3. 群里发 `/helpimg` 验证；用 `/proactivetest` 验证主动发言通道。
+3. 群里发 `/help` 能看到 `[来源: proactive]` 的 4 条命令；用 `/proactivetest` 验证主动发言通道。
 
 ### 最小可用配置
 
@@ -242,16 +238,16 @@ privates = ["123456789"]
 | 项目 | 结果 |
 |---|---|
 | `tests/test_engine.py`（纯逻辑，19 条） | **19/19 通过** |
-| `tests/test_integration.py`（桩 SDK 集成，53 条） | **53/53 通过** |
+| `tests/test_integration.py`（桩 SDK 集成，44 条） | **44/44 通过** |
 | modloader 侧审计（2.0.1 / 2.1.0a3 双版本） | **12/12 项 API 两个版本都存在** |
 | app 侧审计（2.1.0a3 的 CommandContext / 卡片渲染 / 服务名） | **全部通过** |
 | `compileall`（全部源文件语法） | 通过 |
 | 状态持久化 | 实测：写入 `state.json` 后重启引擎可恢复 `enabled` 与历史池 |
 
-覆盖到的行为：注册的命令名与权限、命令描述与用法、注册器不可用时跳过、规则优先级、
-空闲触发投递、冷却拦截、工作时间段拦截、计数兜底触发、活跃度打分触发、
-发言策略拒绝时放弃、通知中心缺失时降级到管线、会话已有管线时跳过、无服务时回落纯文本、
-总开关、状态持久化、指令按权限过滤与关键词过滤、`/helpimg` 发图与文字降级、
+覆盖到的行为：注册的命令名与权限（只注册 4 条、且不含任何 help* 命令）、命令描述、
+注册器不可用时跳过、规则优先级、空闲触发投递、冷却拦截、工作时间段拦截、计数兜底触发、
+活跃度打分触发、发言策略拒绝时放弃、通知中心缺失时降级到管线、会话已有管线时跳过、
+无服务时回落纯文本、总开关、状态持久化、配置宽松输入的规范化、
 消息钩子（记录 / 跳过命令与自身消息 / 图片折叠）。
 
 **兼容性审计怎么做的**：两个脚本，都对着宿主源码做 AST 解析，不靠文档也不靠记忆。
@@ -260,15 +256,14 @@ privates = ["123456789"]
 `RuntimePluginContext` 的真实成员表，再对照本插件用到的每个 `plugin.<attr>` /
 `ctx.<attr>` / `getattr(ctx, "...")` 逐个验证存在性。支持一次传多个 `--ref` 做矩阵对比。
 
-`tools/check_host_api.py`（app 侧）固定 `CommandContext` 字段、`CommandService` 方法、
-`Command` 字段、卡片渲染入口和宿主服务名——这些漂了通常只在运行时才炸。
+`tools/check_host_api.py`（app 侧）固定 `CommandContext` 字段和宿主服务名——这些漂了通常只在运行时才炸。
 
 ```bash
 # modloader：对着已安装的检查，或对比多个版本
 python tools/check_compat.py
 python tools/check_compat.py --ref /path/to/modloader-2.0.1 --ref /path/to/modloader-2.1.0a3
 
-# app：命令上下文 / 卡片渲染 / 宿主服务
+# app：命令上下文 / 宿主服务
 python tools/check_host_api.py --app /path/to/neobot_app
 ```
 
@@ -277,13 +272,12 @@ python tools/check_host_api.py --app /path/to/neobot_app
 - 测试机是 **Python 3.12**，且没有 `uv`，无法运行 NeoBot 官方的 `scripts/plugin_ci.py`
   （它硬性要求 3.13/3.14），因此**没有官方验收报告**，也没有 `plugin.contract.json`；
 - 没有把 `neobot_modloader` 真跑起来（它依赖 pydantic / sqlalchemy / httpx 一整条链），
-  所以 2.1.0a3 的适配结论来自**静态契约比对**，不是真机装载；
-- 没有真实 QQ 账号与 NeoBot 完整运行环境，`/helpimg` 的**实际出图**未在真机验证，
-  只验证了「渲染不可用时安全降级为文本」这条路径；
-- `notification_hub` / `reply_orchestrator` / `command_service` 均按源码签名对接，
+  所以兼容性结论来自**静态契约比对**，不是真机装载；
+- 没有真实 QQ 账号与 NeoBot 完整运行环境，`/help` 里插件命令的实际展示未在真机确认；
+- `notification_hub` / `reply_orchestrator` 均按源码签名对接，
   并用同形状的假对象跑通，但未与真实实例联调。
 
-上线前请按第四节走一遍：先 `/helpimg` 看降级文本是否正常，再 `/proactivetest` 看通道是否通。
+上线前请按第四节走一遍：发 `/help` 确认能看到 4 条插件命令，再用 `/proactivetest` 看通道是否通。
 
 ---
 

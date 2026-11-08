@@ -149,17 +149,6 @@ class ProactiveConfig(BaseModel):
     debug_log: bool = Field(default=False, description="输出触发原因等调试日志")
     verbose_log: bool = Field(default=False, description="输出每条消息的完整判断快照（排查用，平时建议关闭）")
 
-    # --- 指令图片中心 ---
-    help_image_enabled: bool = Field(default=True, description="启用 /helpimg 指令图片总览")
-    help_image_title: str = Field(default="NeoBot 指令总览", description="指令图片的标题")
-    help_image_theme: str = Field(
-        default="default",
-        description="指令图片主题：default / bottle / game / fortune（未知主题自动回落到 default）",
-    )
-    help_image_width: int = Field(default=900, ge=480, le=1600, description="指令图片宽度（像素）")
-    help_image_show_source: bool = Field(default=True, description="在指令图片里显示插件来源标记")
-    help_image_max_rows: int = Field(default=200, ge=10, le=500, description="单张图片最多渲染多少条指令")
-
     # --- 宽松输入 -----------------------------------------------------------
     # 面板保存走 model_validate，插件加载也走同一套模型；校验前先把宽松写法
     # 规范化，两处行为才一致（否则面板里填的简写会在保存时被拒）。

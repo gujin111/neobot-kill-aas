@@ -1,22 +1,23 @@
 """proactive —— NeoBot 第三方插件。
 
-两个部分：
+**主动发言调度**：移植 koishi-plugin-chatluna-proactive-trigger 的空闲触发与活跃度触发，
+用 NeoBot 宿主服务（notification_hub / reply_orchestrator）把话真正说出去。
 
-1. **主动发言调度**：移植 koishi-plugin-chatluna-proactive-trigger 的空闲触发与活跃度触发，
-   用 NeoBot 宿主服务（notification_hub / reply_orchestrator）把话真正说出去。
-2. **指令图片中心**：``/helpimg`` 把所有可用指令渲染成一张图发给用户，按调用者权限过滤；
-   管理类指令全部限定超级管理员（PERM_SUPER_ADMIN）。
+插件只提供管理指令（全部限定超级管理员，命令名为纯字母）：``/proactive``、
+``/proactiveon``、``/proactiveoff``、``/proactivetest``。
 
-命令统一为 ``/`` + 纯字母，注册进宿主命令表。
+**指令总览统一走本体 ``/help``**：插件命令注册进宿主命令表，``/help`` 会把它们与本体命令
+一起列出、按调用者权限过滤，并标上 ``[来源: proactive]``。本插件**不自己实现**帮助入口，
+避免和 ``/help`` 抢同一件事。
 
 兼容性
 ------
-本文件刻意只使用 **modloader 2.0.1 与 2.0.2 都存在** 的接口：
+本文件刻意只使用 **跨 modloader 版本都存在** 的接口：
 
-* 命令用 ``ctx.app_commands.register(...)``，而不是 2.0.2 才有的
+* 命令用 ``ctx.app_commands.register(...)``，而不是 2.0.2+ 才有的
   ``@plugin.command(permission=...)``；
-* 消息监听用 ``@plugin.message(...)``，而不是 2.0.2 才有的 ``@plugin.event(...)``；
-* 后台循环用 ``asyncio.create_task``，而不是 2.0.2 才有的 ``ctx.create_task``。
+* 消息监听用 ``@plugin.message(...)``，而不是 2.0.2+ 才有的 ``@plugin.event(...)``；
+* 后台循环用 ``asyncio.create_task``，而不是 2.0.2+ 才有的 ``ctx.create_task``。
 """
 
 from __future__ import annotations
@@ -50,17 +51,12 @@ PERM_EVERYONE = 0
 PERM_SUB_ADMIN = 1
 PERM_SUPER_ADMIN = 2
 
-_PERMISSION_LABELS = {
-    PERM_EVERYONE: "所有人",
-    PERM_SUB_ADMIN: "次级管理员",
-    PERM_SUPER_ADMIN: "超级管理员",
-}
 
 plugin = Plugin(
     "proactive",
-    version="1.3.1",
+    version="1.4.0",
     description="主动发言调度（空闲 / 活跃度触发）+ 指令图片总览",
-    usage="提供 /helpimg 指令图片总览，以及 /proactive 系列主动发言管理指令",
+    usage="提供 /proactive 系列主动发言管理指令；全部指令用本体的 /help 查看",
     config=ProactiveConfig,
 )
 
@@ -68,10 +64,6 @@ plugin = Plugin(
 # ---------------------------------------------------------------------------
 # 工具函数
 # ---------------------------------------------------------------------------
-
-
-def _permission_label(level: int) -> str:
-    return _PERMISSION_LABELS.get(level, f"等级 {level}")
 
 
 def _log_ctx(ctx: Any, level: str, message: str) -> None:
@@ -112,27 +104,6 @@ def _format_dt(moment: datetime) -> tuple[str, str]:
 
 def _ctx_field(command_ctx: Any, name: str) -> Any:
     return getattr(command_ctx, name, None) if command_ctx is not None else None
-
-
-def _ctx_user_id(command_ctx: Any) -> int | None:
-    value = _ctx_field(command_ctx, "user_id")
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _ctx_keyword(command_ctx: Any) -> str:
-    """命令行里 ``/helpimg`` 之后的原文。"""
-    raw = _ctx_field(command_ctx, "raw_args")
-    if isinstance(raw, str) and raw.strip():
-        return raw.strip()
-    args = _ctx_field(command_ctx, "args")
-    if isinstance(args, (list, tuple)):
-        return " ".join(str(item) for item in args).strip()
-    if isinstance(args, str):
-        return args.strip()
-    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -650,145 +621,6 @@ class ProactiveEngine:
 
 
 # ---------------------------------------------------------------------------
-# 指令图片
-# ---------------------------------------------------------------------------
-
-
-def _command_service(ctx: Any) -> Any:
-    services = getattr(getattr(ctx, "plugin_host", None), "services", None)
-    if services is None:
-        return None
-    return services.get("command_service")
-
-
-def _collect_commands(ctx: Any, user_id: int | None, keyword: str = "") -> list[dict[str, Any]]:
-    """列出调用者有权使用的所有宿主命令。"""
-    service = _command_service(ctx)
-    if service is None:
-        return []
-    try:
-        commands = list(service.registry.commands())
-    except Exception:
-        return []
-    permissions = getattr(service, "permissions", None)
-    rows: list[dict[str, Any]] = []
-    lowered = keyword.strip().lower()
-    for command in commands:
-        level = int(getattr(command, "permission", PERM_EVERYONE))
-        if permissions is not None and user_id is not None:
-            try:
-                if not permissions.can(user_id, level):
-                    continue
-            except Exception:
-                pass
-        name = str(getattr(command, "name", "") or "")
-        usage = str(getattr(command, "usage", "") or "")
-        description = str(getattr(command, "description", "") or "")
-        source = str(getattr(command, "source", "") or "")
-        if lowered:
-            haystack = f"{name} {usage} {description} {source}".lower()
-            if lowered not in haystack:
-                continue
-        rows.append(
-            {
-                "name": name,
-                "usage": usage,
-                "description": description,
-                "permission": level,
-                "source": source,
-            }
-        )
-    rows.sort(key=lambda item: (item["permission"], item["name"].lower()))
-    return rows
-
-
-def _command_label(row: dict[str, Any]) -> str:
-    usage = f" {row['usage']}" if row["usage"] else ""
-    return f"/{row['name']}{usage}"
-
-
-def _rows_to_blocks(rows: list[dict[str, Any]], show_source: bool) -> list[dict[str, Any]]:
-    table_rows: list[list[Any]] = []
-    for row in rows:
-        meta = [f"权限：{_permission_label(row['permission'])}"]
-        if show_source and row["source"]:
-            meta.append(f"来源：{row['source']}")
-        table_rows.append([_command_label(row), row["description"] or "—", meta])
-    return [
-        {
-            "kind": "rows",
-            "columns": ["指令", "说明", "权限 / 来源"],
-            "widths": ["36%", "42%", "22%"],
-            "variant": "commands",
-            "rows": table_rows,
-        }
-    ]
-
-
-def _fallback_text(rows: list[dict[str, Any]], title: str) -> str:
-    lines = [f"{title}（图片渲染不可用，已回退为文字版）", ""]
-    for row in rows:
-        label = _command_label(row)
-        suffix = f"  [{_permission_label(row['permission'])}]"
-        lines.append(f"{label} — {row['description'] or '—'}{suffix}")
-    lines.append("")
-    lines.append(f"共 {len(rows)} 条指令。")
-    return "\n".join(lines)
-
-
-async def _build_help_image(
-    ctx: Any, rows: list[dict[str, Any]], config: ProactiveConfig
-) -> bytes | None:
-    """把指令表渲染成 PNG；渲染不可用时返回 None。"""
-    if not rows:
-        return None
-    try:
-        from neobot_app.runtime.html_card import render_card_html, render_card_image
-    except Exception as exc:
-        _log_ctx(ctx, "warning", f"无法导入卡片渲染模块: {exc}")
-        return None
-    try:
-        html = render_card_html(
-            title=config.help_image_title,
-            subtitle=f"共 {len(rows)} 条可用指令",
-            blocks=_rows_to_blocks(rows, config.help_image_show_source),
-            footer="发送 /helpimg 关键词 可按关键词过滤",
-            theme=config.help_image_theme,
-            width=config.help_image_width,
-        )
-    except Exception as exc:
-        _log_ctx(ctx, "warning", f"卡片 HTML 生成失败: {exc}")
-        return None
-    try:
-        png = await render_card_image(
-            html,
-            timeout=25.0,
-            screenshots=getattr(ctx, "screenshots", None),
-        )
-    except Exception as exc:
-        _log_ctx(ctx, "warning", f"卡片渲染失败: {exc}")
-        return None
-    if not png:
-        _log_ctx(ctx, "warning", "卡片渲染返回空（通常是浏览器 / Chromium 不可用）")
-    return png
-
-
-async def _send_image(ctx: Any, command_ctx: Any, png: bytes, filename: str) -> bool:
-    """优先走宿主命令服务的发图通道；不可用时返回 False，由调用方回退文本。"""
-    service = _ctx_field(command_ctx, "service")
-    kind = str(_ctx_field(command_ctx, "kind") or "")
-    conv_id = str(_ctx_field(command_ctx, "conv_id") or "")
-    sender = getattr(service, "send_image_bytes", None)
-    if callable(sender) and kind and conv_id:
-        try:
-            if await sender(kind, conv_id, png, filename=filename):
-                return True
-        except Exception as exc:
-            _log_ctx(ctx, "warning", f"send_image_bytes 失败，回退文字: {exc}")
-    return False
-
-
-# ---------------------------------------------------------------------------
 # 运行时装配
 # ---------------------------------------------------------------------------
 
@@ -817,29 +649,9 @@ def _register_commands(ctx: Any, config: ProactiveConfig) -> None:
     """把 5 条指令注册进宿主命令表（modloader 2.0.1 / 2.0.2 通用写法）。"""
     registrar = getattr(ctx, "app_commands", None)
     if registrar is None or not getattr(registrar, "available", True):
-        _log_ctx(ctx, "warning", "宿主命令表不可用，跳过 /helpimg 与 /proactive 系列指令注册")
+        _log_ctx(ctx, "warning", "宿主命令表不可用，跳过 /proactive 系列指令注册")
         return
 
-    @registrar.register(
-        "helpimg",
-        description="把所有可用指令渲染成图片发给你（可用关键词过滤）",
-        usage="[关键词]",
-        permission=PERM_EVERYONE,
-    )
-    async def _helpimg(command_ctx: Any):
-        if not config.help_image_enabled:
-            return "指令图片功能已被管理员关闭，可使用 /help 查看文本版。"
-        user_id = _ctx_user_id(command_ctx)
-        keyword = _ctx_keyword(command_ctx)
-        rows = _collect_commands(ctx, user_id, keyword)
-        if not rows:
-            return "没有找到可用指令。" if keyword else "当前没有已注册的指令。"
-        if len(rows) > config.help_image_max_rows:
-            rows = rows[: config.help_image_max_rows]
-        png = await _build_help_image(ctx, rows, config)
-        if png is not None and await _send_image(ctx, command_ctx, png, "neobot-commands.png"):
-            return None
-        return _fallback_text(rows, config.help_image_title)
 
     @registrar.register(
         "proactive",

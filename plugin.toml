@@ -1,5 +1,5 @@
 name = "proactive"
-version = "1.3.1"
+version = "1.4.0"
 description = "主动发言调度（空闲 / 活跃度触发）+ 指令图片总览"
 author = "ported from koishi-plugin-chatluna-proactive-trigger"
 dependencies = []
@@ -48,21 +48,3 @@ debug_log = false
 
 # 输出每条消息的完整判断快照（排查用，平时建议关闭）
 verbose_log = false
-
-# 启用 /helpimg 指令图片总览
-help_image_enabled = true
-
-# 指令图片的标题
-help_image_title = "NeoBot 指令总览"
-
-# 指令图片主题：default / bottle / game / fortune
-help_image_theme = "default"
-
-# 指令图片宽度（像素）
-help_image_width = 900
-
-# 在指令图片里显示插件来源标记
-help_image_show_source = true
-
-# 单张图片最多渲染多少条指令
-help_image_max_rows = 200

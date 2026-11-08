@@ -210,42 +210,6 @@ class FakeCtx:
         return {"status": "ok"}
 
 
-class FakeCommand:
-    def __init__(self, name, permission, description="", usage="", source=""):
-        self.name = name
-        self.permission = permission
-        self.description = description
-        self.usage = usage
-        self.source = source
-
-
-class FakeRegistry:
-    def __init__(self, commands):
-        self._commands = commands
-
-    def commands(self):
-        return list(self._commands)
-
-
-class FakePermissions:
-    def __init__(self, level_of_user):
-        self._level = level_of_user
-
-    def can(self, user_id, level):
-        return self._level.get(int(user_id), 0) >= level
-
-
-class FakeCommandService:
-    def __init__(self, commands, level_of_user):
-        self.registry = FakeRegistry(commands)
-        self.permissions = FakePermissions(level_of_user)
-        self.images: list[dict] = []
-
-    async def send_image_bytes(self, kind, conv_id, data, *, at_user_id=None, filename=None):
-        self.images.append({"kind": kind, "conv_id": conv_id, "data": data, "filename": filename})
-        return True
-
-
 class FakeCommandContext:
     """模拟宿主 neobot_app.commands.model.CommandContext。"""
 
@@ -310,7 +274,7 @@ def _registered(ctx, name):
 
 def test_plugin_identity_and_export():
     assert PLUGIN.name == "proactive"
-    assert PLUGIN.version == "1.3.1"
+    assert PLUGIN.version == "1.4.0"
     assert PLUGIN.config_model.__name__ == "ProactiveConfig"
 
 
@@ -334,26 +298,25 @@ def test_only_letter_slash_commands_are_registered():
     with _tmpdir() as tmp:
         ctx = _bootstrap(tmp)
     names = [item["name"] for item in ctx.app_commands.registered]
-    assert names == ["helpimg", "proactive", "proactiveon", "proactiveoff", "proactivetest"], names
+    assert names == ["proactive", "proactiveon", "proactiveoff", "proactivetest"], names
     for name in names:
         assert name.isalpha(), f"{name} 不是纯字母"
 
 
-def test_help_image_command_is_public_and_core_commands_are_super_admin_only():
+def test_plugin_does_not_register_its_own_help_entry():
+    """指令总览统一走本体 /help，插件不该再注册任何 help* 命令去抢这件事。"""
     with _tmpdir() as tmp:
         ctx = _bootstrap(tmp)
-    perms = {item["name"]: item["permission"] for item in ctx.app_commands.registered}
-    assert perms["helpimg"] == MODULE.PERM_EVERYONE
-    for name in ("proactive", "proactiveon", "proactiveoff", "proactivetest"):
-        assert perms[name] == MODULE.PERM_SUPER_ADMIN, name
+    names = [item["name"] for item in ctx.app_commands.registered]
+    assert not [name for name in names if name.startswith("help")], names
 
 
-def test_commands_carry_description_and_usage():
+def test_all_commands_are_super_admin_only_and_described():
     with _tmpdir() as tmp:
         ctx = _bootstrap(tmp)
-    helpimg = _registered(ctx, "helpimg")
-    assert helpimg["description"]
-    assert helpimg["usage"] == "[关键词]"
+    for item in ctx.app_commands.registered:
+        assert item["description"], item["name"]
+        assert item["permission"] == MODULE.PERM_SUPER_ADMIN, item["name"]
 
 
 def test_registration_is_skipped_when_registrar_unavailable():
@@ -691,149 +654,6 @@ def test_state_persists_enabled_flag_and_sessions():
 # ---------------------------------------------------------------------------
 # 指令行为
 # ---------------------------------------------------------------------------
-
-
-def _fake_commands():
-    return [
-        FakeCommand("help", MODULE.PERM_EVERYONE, "show help", "[command]"),
-        FakeCommand("mg", MODULE.PERM_EVERYONE, "minigame", "[game]", source="minigame"),
-        FakeCommand("reload", MODULE.PERM_SUPER_ADMIN, "reload config", source="dashboard"),
-    ]
-
-
-def test_collect_commands_filters_by_permission():
-    service = FakeCommandService(
-        _fake_commands(), {1001: MODULE.PERM_EVERYONE, 2002: MODULE.PERM_SUPER_ADMIN}
-    )
-    with _tmpdir() as tmp:
-        ctx = FakeCtx(tmp, FakeServices(command_service=service))
-        normal = MODULE._collect_commands(ctx, 1001)
-        admin = MODULE._collect_commands(ctx, 2002)
-    assert {row["name"] for row in normal} == {"help", "mg"}
-    assert {row["name"] for row in admin} == {"help", "mg", "reload"}
-
-
-def test_collect_commands_supports_keyword_filter():
-    service = FakeCommandService(_fake_commands(), {2002: MODULE.PERM_SUPER_ADMIN})
-    with _tmpdir() as tmp:
-        ctx = FakeCtx(tmp, FakeServices(command_service=service))
-        rows = MODULE._collect_commands(ctx, 2002, "reload")
-        assert [row["name"] for row in rows] == ["reload"]
-
-
-def test_collect_commands_without_service_returns_empty():
-    with _tmpdir() as tmp:
-        ctx = FakeCtx(tmp, FakeServices())
-        assert MODULE._collect_commands(ctx, 1) == []
-
-
-def test_command_rows_render_expected_labels_and_blocks():
-    rows = [
-        {
-            "name": "help",
-            "usage": "[command]",
-            "description": "show help",
-            "permission": MODULE.PERM_EVERYONE,
-            "source": "",
-        },
-    ]
-    assert MODULE._command_label(rows[0]) == "/help [command]"
-    blocks = MODULE._rows_to_blocks(rows, True)
-    assert blocks[0]["kind"] == "rows"
-    assert blocks[0]["variant"] == "commands"
-    assert blocks[0]["rows"][0][0] == "/help [command]"
-
-
-def test_fallback_text_lists_every_command():
-    rows = [
-        {
-            "name": "help",
-            "usage": "",
-            "description": "show help",
-            "permission": MODULE.PERM_EVERYONE,
-            "source": "",
-        },
-        {
-            "name": "reload",
-            "usage": "",
-            "description": "reload",
-            "permission": MODULE.PERM_SUPER_ADMIN,
-            "source": "dashboard",
-        },
-    ]
-    text = MODULE._fallback_text(rows, "TITLE")
-    assert "/help" in text and "/reload" in text
-
-
-def test_helpimg_returns_text_fallback_when_renderer_missing():
-    """测试机上没有 neobot_app，渲染模块导入失败时必须安全回退成文字。"""
-
-    async def scenario():
-        with _tmpdir() as tmp:
-            service = FakeCommandService(_fake_commands(), {1001: MODULE.PERM_EVERYONE})
-            ctx = await _bootstrap_async(tmp, FakeServices(command_service=service))
-            handler = _registered(ctx, "helpimg")["handler"]
-            command_ctx = FakeCommandContext("group", "100", 1001, service)
-            result = await handler(command_ctx)
-            assert isinstance(result, str)
-            assert "/help" in result and "/mg" in result
-            assert "reload" not in result
-
-    asyncio.run(scenario())
-
-
-def test_helpimg_honours_keyword_arg():
-    async def scenario():
-        with _tmpdir() as tmp:
-            service = FakeCommandService(_fake_commands(), {2002: MODULE.PERM_SUPER_ADMIN})
-            ctx = await _bootstrap_async(tmp, FakeServices(command_service=service))
-            handler = _registered(ctx, "helpimg")["handler"]
-            command_ctx = FakeCommandContext("group", "100", 2002, service, raw_args="reload")
-            result = await handler(command_ctx)
-            assert isinstance(result, str)
-            assert "/reload" in result
-            assert "/help" not in result
-
-    asyncio.run(scenario())
-
-
-def test_helpimg_returns_none_after_sending_image():
-    async def scenario():
-        with _tmpdir() as tmp:
-            service = FakeCommandService(_fake_commands(), {1001: MODULE.PERM_EVERYONE})
-            ctx = await _bootstrap_async(tmp, FakeServices(command_service=service))
-            handler = _registered(ctx, "helpimg")["handler"]
-            command_ctx = FakeCommandContext("group", "100", 1001, service)
-
-            async def fake_render(ctx_arg, rows, config):
-                return b"PNG"
-
-            original = MODULE._build_help_image
-            MODULE._build_help_image = fake_render
-            try:
-                result = await handler(command_ctx)
-            finally:
-                MODULE._build_help_image = original
-            assert result is None
-            assert len(service.images) == 1
-            assert service.images[0]["kind"] == "group"
-            assert service.images[0]["conv_id"] == "100"
-
-    asyncio.run(scenario())
-
-
-def test_helpimg_disabled_returns_hint():
-    async def scenario():
-        with _tmpdir() as tmp:
-            service = FakeCommandService(_fake_commands(), {1001: MODULE.PERM_EVERYONE})
-            ctx = await _bootstrap_async(
-                tmp, FakeServices(command_service=service), help_image_enabled=False
-            )
-            handler = _registered(ctx, "helpimg")["handler"]
-            result = await handler(FakeCommandContext("group", "100", 1001, service))
-            assert isinstance(result, str) and "关闭" in result
-
-    asyncio.run(scenario())
 
 
 def test_proactive_commands_report_status_and_toggle():
