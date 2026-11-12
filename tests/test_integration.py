@@ -227,6 +227,27 @@ class FakeCommandContext:
         self.sent.append(text)
 
 
+class FakePerms:
+    def __init__(self, level):
+        self.level = level
+
+    def can(self, user_id, level):
+        return self.level >= level
+
+
+class FakeAdminService:
+    """只用来喂 permissions.can() 的假服务。"""
+
+    def __init__(self, level=None):
+        self.permissions = FakePerms(MODULE.PERM_SUPER_ADMIN if level is None else level)
+
+
+def _as_super_admin(command_ctx):
+    """把命令上下文标成超级管理员调用。"""
+    command_ctx.service = FakeAdminService(MODULE.PERM_SUPER_ADMIN)
+    return command_ctx
+
+
 def _make_config(module, **overrides):
     config = module.ProactiveConfig()
     for key, value in overrides.items():
@@ -282,7 +303,7 @@ def _registered(ctx, name):
 
 def test_plugin_identity_and_export():
     assert PLUGIN.name == "proactive"
-    assert PLUGIN.version == "1.5.2"
+    assert PLUGIN.version == "1.6.0"
     assert PLUGIN.config_model.__name__ == "ProactiveConfig"
 
 
@@ -319,12 +340,16 @@ def test_plugin_does_not_register_its_own_help_entry():
     assert not [name for name in names if name.startswith("help")], names
 
 
-def test_all_commands_are_super_admin_only_and_described():
+def test_admin_commands_are_super_admin_only_and_described():
+    """管理类指令仅超管；/proactive 是全员自助查 ID，靠内部判定收窄。"""
     with _tmpdir() as tmp:
         ctx = _bootstrap(tmp)
+    perms = {item["name"]: item["permission"] for item in ctx.app_commands.registered}
     for item in ctx.app_commands.registered:
         assert item["description"], item["name"]
-        assert item["permission"] == MODULE.PERM_SUPER_ADMIN, item["name"]
+    assert perms["proactive"] == MODULE.PERM_EVERYONE
+    for name in ("proactiveon", "proactiveoff", "proactivetest"):
+        assert perms[name] == MODULE.PERM_SUPER_ADMIN, name
 
 
 def test_registration_is_skipped_when_registrar_unavailable():
@@ -671,7 +696,9 @@ def test_proactive_commands_report_status_and_toggle():
             engine = MODULE._current_engine()
             assert engine is not None
 
-            status = await _registered(ctx, "proactive")["handler"](FakeCommandContext("group", "1", 1, None))
+            status = await _registered(ctx, "proactive")["handler"](
+                _as_super_admin(FakeCommandContext("group", "1", 1, None))
+            )
             assert isinstance(status, str) and "总开关" in status
 
             await _registered(ctx, "proactiveoff")["handler"](FakeCommandContext("group", "1", 1, None))
@@ -1026,7 +1053,8 @@ def test_proactive_status_shows_current_conversation_id():
         with _tmpdir() as tmp:
             ctx = await _bootstrap_async(tmp, FakeServices(), groups=[])
             handler = _registered(ctx, "proactive")["handler"]
-            result = await handler(FakeCommandContext("group", "1234567890123", 1, None))
+            command_ctx = _as_super_admin(FakeCommandContext("group", "1234567890123", 1, None))
+            result = await handler(command_ctx)
             assert "当前会话" in result
             assert "1234567890123" in result
             assert "命中规则：无" in result
@@ -1044,8 +1072,9 @@ def test_proactive_status_reports_matched_rule_and_mapping():
                 groups=[_group_rule(MODULE, guild_id="987654321", enable_idle_trigger=True)],
             )
             handler = _registered(ctx, "proactive")["handler"]
+            command_ctx = _as_super_admin(FakeCommandContext("group", "1234567890123", 1, None))
             with _fake_identity(**{"1234567890123": 987654321}):
-                result = await handler(FakeCommandContext("group", "1234567890123", 1, None))
+                result = await handler(command_ctx)
             assert "命中规则：987654321" in result
             assert "空闲" in result
 
@@ -1059,8 +1088,44 @@ def test_proactive_status_warns_when_triggers_are_off():
                 tmp, FakeServices(), groups=[_group_rule(MODULE, guild_id="100")]
             )
             handler = _registered(ctx, "proactive")["handler"]
-            result = await handler(FakeCommandContext("group", "100", 1, None))
+            command_ctx = _as_super_admin(FakeCommandContext("group", "100", 1, None))
+            result = await handler(command_ctx)
             assert "两个触发开关都是关的" in result
+
+    asyncio.run(scenario())
+
+
+def test_proactive_status_hides_global_state_from_non_admin():
+    """普通用户只能拿到自己的会话 ID —— 官方通道上他们得能自己查。"""
+    async def scenario():
+        with _tmpdir() as tmp:
+            ctx = await _bootstrap_async(
+                tmp,
+                FakeServices(),
+                groups=[_group_rule(MODULE, guild_id="100", enable_idle_trigger=True)],
+            )
+            handler = _registered(ctx, "proactive")["handler"]
+            normal = FakeCommandContext("private", "1234567890123", 42, FakeAdminService(MODULE.PERM_EVERYONE))
+            result = await handler(normal)
+            assert "1234567890123" in result
+            assert "privates[].user_id" in result
+            # 全局调度状态不能泄露
+            assert "总开关" not in result
+            assert "跟踪中的会话" not in result
+
+    asyncio.run(scenario())
+
+
+def test_proactive_status_self_view_mentions_mapping_when_bound():
+    async def scenario():
+        with _tmpdir() as tmp:
+            ctx = await _bootstrap_async(tmp, FakeServices(), groups=[])
+            handler = _registered(ctx, "proactive")["handler"]
+            normal = FakeCommandContext("private", "1234567890123", 42, FakeAdminService(MODULE.PERM_EVERYONE))
+            with _fake_identity(**{"1234567890123": 987654321}):
+                result = await handler(normal)
+            assert "987654321" in result
+            assert "已绑定" in result
 
     asyncio.run(scenario())
 

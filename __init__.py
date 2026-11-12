@@ -54,7 +54,7 @@ PERM_SUPER_ADMIN = 2
 
 plugin = Plugin(
     "proactive",
-    version="1.5.2",
+    version="1.6.0",
     description="主动发言调度（空闲 / 活跃度触发）+ 指令图片总览",
     usage="提供 /proactive 系列主动发言管理指令；全部指令用本体的 /help 查看",
     config=ProactiveConfig,
@@ -250,6 +250,48 @@ def _display_target(state: SessionState) -> str:
         return state.key
     label = "群号" if state.kind == "group" else "QQ"
     return f"{state.key}（真实{label} {'/'.join(state.aliases)}）"
+
+
+def _is_super_admin(command_ctx: Any) -> bool:
+    """按宿主权限判定当前调用者是不是超级管理员。"""
+    service = _ctx_field(command_ctx, "service")
+    permissions = getattr(service, "permissions", None)
+    raw = _ctx_field(command_ctx, "user_id")
+    if permissions is None or raw is None:
+        return False
+    try:
+        user_id: Any = int(raw)
+    except (TypeError, ValueError):
+        user_id = raw
+    try:
+        return bool(permissions.can(user_id, PERM_SUPER_ADMIN))
+    except Exception:
+        return False
+
+
+def _self_id_lines(command_ctx: Any) -> list[str]:
+    """只回当前会话自己的 ID —— 给普通用户看的极简版。
+
+    官方通道下真实 QQ 号对 bot 不可见，管理员也没法替别人查会话，所以每个人
+    都得能自己拿到「发给管理员的那串 ID」。
+    """
+    kind = str(_ctx_field(command_ctx, "kind") or "")
+    conv_id = str(_ctx_field(command_ctx, "conv_id") or "")
+    if kind not in {"group", "private"} or not conv_id:
+        return ["无法确定当前会话，请在群聊或私聊里使用。"]
+
+    aliases = _resolve_aliases(kind, conv_id)
+    label = "群号" if kind == "group" else "QQ"
+    field_name = "groups[].guild_id" if kind == "group" else "privates[].user_id"
+    lines = [
+        f"你在主动发言里的 {label}：{conv_id}",
+    ]
+    if aliases:
+        lines.append(f"（已绑定真实{'群号' if kind == 'group' else 'QQ'}：{'/'.join(aliases)}）")
+    else:
+        lines.append(f"把这串 ID 发给管理员，填进配置的 {field_name} 即可生效")
+    lines.append("（完整调度状态只有超级管理员能看）")
+    return lines
 
 
 def _current_conversation_lines(engine: Any, command_ctx: Any) -> list[str]:
@@ -769,13 +811,15 @@ def _register_commands(ctx: Any, config: ProactiveConfig) -> None:
 
     @registrar.register(
         "proactive",
-        description="查看主动发言调度状态与当前会话 ID（超级管理员）",
-        permission=PERM_SUPER_ADMIN,
+        description="查看自己在主动发言里的会话 ID；超级管理员可看完整调度状态",
+        permission=PERM_EVERYONE,
     )
     async def _status(command_ctx: Any):
         current = _current_engine()
         if current is None:
             return "调度器尚未初始化。"
+        if not _is_super_admin(command_ctx):
+            return "\n".join(_self_id_lines(command_ctx))
         lines = current.status_lines()
         section = _current_conversation_lines(current, command_ctx)
         if section:
