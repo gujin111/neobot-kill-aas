@@ -54,7 +54,7 @@ PERM_SUPER_ADMIN = 2
 
 plugin = Plugin(
     "proactive",
-    version="1.5.0",
+    version="1.5.1",
     description="主动发言调度（空闲 / 活跃度触发）+ 指令图片总览",
     usage="提供 /proactive 系列主动发言管理指令；全部指令用本体的 /help 查看",
     config=ProactiveConfig,
@@ -250,6 +250,48 @@ def _display_target(state: SessionState) -> str:
         return state.key
     label = "群号" if state.kind == "group" else "QQ"
     return f"{state.key}（真实{label} {'/'.join(state.aliases)}）"
+
+
+def _current_conversation_lines(engine: Any, command_ctx: Any) -> list[str]:
+    """当前会话的 ID / 真实号码 / 是否命中规则。
+
+    解决官方通道上的鸡生蛋问题：没配规则时不会跟踪会话，`/proactive` 的
+    「跟踪中的会话」是空的，用户就不知道自己的群 ID 到底是多少。
+    """
+    kind = str(_ctx_field(command_ctx, "kind") or "")
+    conv_id = str(_ctx_field(command_ctx, "conv_id") or "")
+    if kind not in {"group", "private"} or not conv_id:
+        return []
+
+    aliases = _resolve_aliases(kind, conv_id)
+    label = "真实群号" if kind == "group" else "真实 QQ"
+    rule = engine.rule_for(kind, conv_id, aliases)
+
+    lines = [
+        "当前会话：",
+        f"  类型：{kind}",
+        f"  通道 ID：{conv_id}",
+        f"  {label}：{'/'.join(aliases) if aliases else '（未绑定）'}",
+    ]
+    if rule is None:
+        field_name = "groups[].guild_id" if kind == "group" else "privates[].user_id"
+        lines.append("  命中规则：无（这个会话不会被记录，也就不会主动发言）")
+        lines.append(f"  → 把 {conv_id} 填进 {field_name}")
+        if not aliases:
+            hint = "/linkgroup <群号>" if kind == "group" else "/linkqq <QQ号>"
+            lines.append(f"     或先用 {hint} 绑定真实号码，之后直接填真实号码")
+    else:
+        rule_id = getattr(rule, "guild_id", None) or getattr(rule, "user_id", "")
+        triggers = []
+        if getattr(rule, "enable_activity_trigger", False):
+            triggers.append("活跃度")
+        if getattr(rule, "enable_idle_trigger", False):
+            triggers.append("空闲")
+        state_text = "/".join(triggers) if triggers else "两个触发开关都是关的"
+        lines.append(f"  命中规则：{rule_id}（{state_text}）")
+        if not triggers:
+            lines.append("  → 规则命中了但不会发言：请打开 enable_idle_trigger 或 enable_activity_trigger")
+    return lines
 
 
 def _as_id(value: Any) -> Any:
@@ -725,14 +767,19 @@ def _register_commands(ctx: Any, config: ProactiveConfig) -> None:
 
     @registrar.register(
         "proactive",
-        description="查看主动发言调度状态（超级管理员）",
+        description="查看主动发言调度状态与当前会话 ID（超级管理员）",
         permission=PERM_SUPER_ADMIN,
     )
     async def _status(command_ctx: Any):
         current = _current_engine()
         if current is None:
             return "调度器尚未初始化。"
-        return "\n".join(current.status_lines())
+        lines = current.status_lines()
+        section = _current_conversation_lines(current, command_ctx)
+        if section:
+            lines.append("")
+            lines.extend(section)
+        return "\n".join(lines)
 
     @registrar.register(
         "proactiveon",

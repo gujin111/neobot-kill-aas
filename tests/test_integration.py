@@ -282,7 +282,7 @@ def _registered(ctx, name):
 
 def test_plugin_identity_and_export():
     assert PLUGIN.name == "proactive"
-    assert PLUGIN.version == "1.5.0"
+    assert PLUGIN.version == "1.5.1"
     assert PLUGIN.config_model.__name__ == "ProactiveConfig"
 
 
@@ -994,6 +994,51 @@ def test_as_id_passes_numeric_through_as_int():
     assert MODULE._as_id("1234567890123") == 1234567890123
     assert MODULE._as_id(" 42 ") == 42
     assert MODULE._as_id("abc") == "abc"
+
+
+def test_proactive_status_shows_current_conversation_id():
+    """/proactive 要能回答「我的群 ID 是多少」——配规则之前就得看得到。"""
+    async def scenario():
+        with _tmpdir() as tmp:
+            ctx = await _bootstrap_async(tmp, FakeServices(), groups=[])
+            handler = _registered(ctx, "proactive")["handler"]
+            result = await handler(FakeCommandContext("group", "1234567890123", 1, None))
+            assert "当前会话" in result
+            assert "1234567890123" in result
+            assert "命中规则：无" in result
+            assert "groups[].guild_id" in result
+
+    asyncio.run(scenario())
+
+
+def test_proactive_status_reports_matched_rule_and_mapping():
+    async def scenario():
+        with _tmpdir() as tmp:
+            ctx = await _bootstrap_async(
+                tmp,
+                FakeServices(),
+                groups=[_group_rule(MODULE, guild_id="987654321", enable_idle_trigger=True)],
+            )
+            handler = _registered(ctx, "proactive")["handler"]
+            with _fake_identity(**{"1234567890123": 987654321}):
+                result = await handler(FakeCommandContext("group", "1234567890123", 1, None))
+            assert "命中规则：987654321" in result
+            assert "空闲" in result
+
+    asyncio.run(scenario())
+
+
+def test_proactive_status_warns_when_triggers_are_off():
+    async def scenario():
+        with _tmpdir() as tmp:
+            ctx = await _bootstrap_async(
+                tmp, FakeServices(), groups=[_group_rule(MODULE, guild_id="100")]
+            )
+            handler = _registered(ctx, "proactive")["handler"]
+            result = await handler(FakeCommandContext("group", "100", 1, None))
+            assert "两个触发开关都是关的" in result
+
+    asyncio.run(scenario())
 
 
 def _run_all() -> int:
