@@ -27,6 +27,8 @@ from pathlib import Path
 REQUIRED_CONTEXT_FIELDS = {"service", "kind", "conv_id", "user_id"}
 #: 插件从宿主服务注册表里取的键
 REQUIRED_HOST_SERVICES = {"notification_hub", "reply_orchestrator"}
+#: 官方通道（2.1.0a8+）：合成 ID ↔ 真实 QQ 号/群号 的映射函数
+REQUIRED_IDENTITY_FUNCS = {"qq_for_user", "group_number_for", "synthetic_for_qq"}
 
 
 def _parse(path: Path) -> ast.Module | None:
@@ -98,6 +100,14 @@ def main() -> int:
     print("===== CommandContext =====")
     fields = _class_fields(_parse(app / "commands" / "model.py"), "CommandContext")
     report("字段齐全", REQUIRED_CONTEXT_FIELDS - fields)
+
+    print("\n===== 官方通道身份映射（neobot_app.user_identity）=====")
+    identity = _parse(app / "user_identity.py")
+    if identity is None:
+        print("  SKIP 该版本没有 user_identity.py（2.1.0a8 之前没有官方通道）")
+    else:
+        funcs = _module_functions(identity)
+        report("映射函数齐全", REQUIRED_IDENTITY_FUNCS - funcs)
 
     print("\n===== 宿主服务注册 =====")
     boot = app / "bootstrap" / "parts" / "application.py"

@@ -54,7 +54,7 @@ PERM_SUPER_ADMIN = 2
 
 plugin = Plugin(
     "proactive",
-    version="1.4.0",
+    version="1.5.0",
     description="主动发言调度（空闲 / 活跃度触发）+ 指令图片总览",
     usage="提供 /proactive 系列主动发言管理指令；全部指令用本体的 /help 查看",
     config=ProactiveConfig,
@@ -204,10 +204,61 @@ class SessionState:
     messages_since_trigger: int = 0
     failures: int = 0
     failure_cooldown_until: float = 0.0
+    #: 官方通道的合成 ID 对应的真实 QQ 号/群号（来自 user_identity 映射）
+    aliases: tuple[str, ...] = ()
 
     @property
     def key(self) -> str:
         return f"{self.kind}:{self.conversation_id}"
+
+
+def _identity_module() -> Any:
+    """宿主的人工身份映射（官方合成 ID ↔ 真实 QQ 号/群号）。
+
+    NeoBot 2.1.0a8 起官方机器人通道给的是 13 位合成 ID，和真实 QQ 号没有 API 可以互转，
+    只能靠管理员命令 `/linkqq`、`/linkgroup` 建立映射。拿不到就算了——插件在纯
+    OneBot 环境里不需要它。
+    """
+    try:
+        from neobot_app import user_identity  # noqa: WPS433 - 运行期可选依赖
+
+        return user_identity
+    except Exception:
+        return None
+
+
+def _resolve_aliases(kind: str, conversation_id: str) -> tuple[str, ...]:
+    """把官方合成 ID 映射回真实 QQ 号/群号；没建立映射时返回空。"""
+    module = _identity_module()
+    if module is None:
+        return ()
+    try:
+        if kind == "group":
+            real = module.group_number_for(conversation_id)
+        else:
+            real = module.qq_for_user(conversation_id)
+    except Exception:
+        return ()
+    text = str(real or "").strip()
+    if not text or text == str(conversation_id):
+        return ()
+    return (text,)
+
+
+def _display_target(state: SessionState) -> str:
+    if not state.aliases:
+        return state.key
+    label = "群号" if state.kind == "group" else "QQ"
+    return f"{state.key}（真实{label} {'/'.join(state.aliases)}）"
+
+
+def _as_id(value: Any) -> Any:
+    """会话 ID 优先按整数传给适配器；非数字的原样透传。"""
+    text = str(value).strip()
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return text
 
 
 # ---------------------------------------------------------------------------
@@ -243,22 +294,34 @@ class ProactiveEngine:
         self._dirty = True
         self.save(force=True)
 
-    def rule_for(self, kind: str, conversation_id: str) -> GroupRule | PrivateRule | None:
-        """精确匹配 > applyDefault 命中的默认模板 > 无规则（与上游优先级一致）。"""
+    def rule_for(
+        self, kind: str, conversation_id: str, aliases: tuple[str, ...] = ()
+    ) -> GroupRule | PrivateRule | None:
+        """精确匹配 > applyDefault 命中的默认模板 > 无规则（与上游优先级一致）。
+
+        ``aliases`` 是官方合成 ID 映射出的真实 QQ 号/群号：两套 ID 都算候选，
+        所以规则里写真实号码或写合成 ID 都能命中。
+        """
+        candidates = {str(conversation_id)}
+        for alias in aliases:
+            text = str(alias or "").strip()
+            if text:
+                candidates.add(text)
+
         if kind == "group":
-            exact = [r for r in self._config.groups if r.guild_id == conversation_id]
+            exact = [r for r in self._config.groups if r.guild_id in candidates]
             if exact:
                 return exact[0]
-            if conversation_id in self._config.apply_default_group_configs:
+            if candidates & set(self._config.apply_default_group_configs):
                 for rule in self._config.groups:
                     if rule.guild_id == "default":
                         return rule
             return None
         if kind == "private":
-            exact = [r for r in self._config.privates if r.user_id == conversation_id]
+            exact = [r for r in self._config.privates if r.user_id in candidates]
             if exact:
                 return exact[0]
-            if conversation_id in self._config.apply_default_private_configs:
+            if candidates & set(self._config.apply_default_private_configs):
                 for rule in self._config.privates:
                     if rule.user_id == "default":
                         return rule
@@ -268,7 +331,8 @@ class ProactiveEngine:
     # -- 记录 ---------------------------------------------------------------
 
     def record(self, kind: str, conversation_id: str, text: str, sender_name: str = "") -> None:
-        rule = self.rule_for(kind, conversation_id)
+        aliases = _resolve_aliases(kind, conversation_id)
+        rule = self.rule_for(kind, conversation_id, aliases)
         if rule is None:
             return
         now = time.time()
@@ -278,8 +342,12 @@ class ProactiveEngine:
                 kind=kind,
                 conversation_id=conversation_id,
                 current_threshold=float(getattr(rule, "activity_lower_limit", 0.85)),
+                aliases=aliases,
             )
             self._sessions[state.key] = state
+        elif aliases != state.aliases:
+            # 映射可能是后来才用 /linkqq 建立的
+            state.aliases = aliases
         state.timestamps.append(now)
         state.last_message_time = now
         state.messages_since_trigger += 1
@@ -314,7 +382,7 @@ class ProactiveEngine:
                 self._log("warning", f"评估 {state.key} 失败: {exc}")
 
     async def _evaluate(self, state: SessionState, now: float, moment: datetime) -> None:
-        rule = self.rule_for(state.kind, state.conversation_id)
+        rule = self.rule_for(state.kind, state.conversation_id, state.aliases)
         if rule is None:
             return
         if not engine.in_work_hours(getattr(rule, "work_hours", ""), moment):
@@ -480,9 +548,9 @@ class ProactiveEngine:
         """最后兜底：直接发一条纯文本（同样会经过适配器的发言策略）。"""
         try:
             if state.kind == "group":
-                await self._ctx.send_group(int(state.conversation_id), prompt)
+                await self._ctx.send_group(_as_id(state.conversation_id), prompt)
             else:
-                await self._ctx.send_private(int(state.conversation_id), prompt)
+                await self._ctx.send_private(_as_id(state.conversation_id), prompt)
             return True
         except Exception as exc:
             self._log("warning", f"{state.key} 兜底发送失败: {exc}")
@@ -491,7 +559,8 @@ class ProactiveEngine:
     async def force_trigger(self, kind: str, conversation_id: str) -> str:
         """管理用：忽略冷却与阈值，立即在当前会话试触发一次。"""
         state = self._sessions.get(f"{kind}:{conversation_id}")
-        rule = self.rule_for(kind, conversation_id)
+        aliases = _resolve_aliases(kind, conversation_id)
+        rule = self.rule_for(kind, conversation_id, aliases)
         if rule is None:
             return "当前会话没有匹配的主动发言规则，请先在插件配置里添加该群/用户"
         if state is None:
@@ -499,6 +568,7 @@ class ProactiveEngine:
                 kind=kind,
                 conversation_id=conversation_id,
                 current_threshold=float(getattr(rule, "activity_lower_limit", 0.85)),
+                aliases=aliases,
             )
             self._sessions[state.key] = state
         moment = datetime.now()
@@ -601,7 +671,7 @@ class ProactiveEngine:
         for state in sorted(
             self._sessions.values(), key=lambda s: s.last_message_time, reverse=True
         )[:20]:
-            rule = self.rule_for(state.kind, state.conversation_id)
+            rule = self.rule_for(state.kind, state.conversation_id, state.aliases)
             if rule is None:
                 continue
             active = []
@@ -614,7 +684,7 @@ class ProactiveEngine:
                 int((time.time() - state.last_message_time) // 60) if state.last_message_time else -1
             )
             lines.append(
-                f"· {state.key}  [{state_text}]  消息 {len(state.messages)} 条，"
+                f"· {_display_target(state)}  [{state_text}]  消息 {len(state.messages)} 条，"
                 f"阈值 {state.current_threshold:.2f}，空闲 {idle_minutes} 分钟"
             )
         return lines

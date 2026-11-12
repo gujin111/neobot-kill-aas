@@ -13,6 +13,7 @@
 | **1.3.0** | `d3aabea` | 适配 modloader 2.1.0a3，并补上可复跑的双版本审计工具 |
 | **1.3.1** | `0cf3f10` | 容错只修在加载期，面板保存仍被拒 → 「添加不了私聊规则」 |
 | **1.4.0** | `e2caedd` | `/helpimg` 与本体 `/help` 语义重叠，删除并统一入口 |
+| **1.5.0** | — | 适配 2.1.0a8 官方机器人通道：会话 ID 变成 13 位合成 ID，按真实 QQ 号配的规则失效 |
 
 ---
 
@@ -207,6 +208,40 @@ visible = [
 
 副作用是好的：不再依赖 `html_card` / `ctx.screenshots`，少了一条
 「没有 Chromium 就降级」的路径。
+
+---
+
+## 1.5.0
+
+### 问题：官方机器人通道上线后，按真实 QQ 号配的规则全部失效
+
+**现象**：NeoBot 2.1.0a8 把新部署的默认通道改成官方机器人（`adapter.mode=official`），
+升级后主动发言不再触发，`/proactive` 里「跟踪中的会话」是空的。
+
+**根因**：官方通道的 `group_id` / `user_id` 不是真实 QQ 号，而是
+**13 位合成 ID**（由 `openid` 派生）。而规则里写的是真实群号/QQ 号，
+`rule_for()` 拿合成 ID 去比，永远不相等 → 连消息都不记录。
+
+官方文档也说明了：`group_openid` 没有到 QQ 群号的映射，二者只能**人工绑定**
+（NeoBot 提供 `/linkqq`、`/linkgroup`，落在 `data/user_qq_map.json`）。
+
+**修复**：
+
+- 新增 `_resolve_aliases()`，通过 `neobot_app.user_identity` 的
+  `qq_for_user` / `group_number_for` 把合成 ID 映射回真实号；
+- `rule_for()` 改成对**候选 ID 集合**匹配（合成 ID + 真实号），
+  两种写法都能命中，`apply_default_*` 也一并按候选集判断；
+- 会话状态记录 `aliases`，`/proactive` 显示成
+  `group:1234567890123（真实群号 987654321）`，方便直接复制；
+- 发送时不再无脑 `int(conversation_id)`，非数字 ID 原样透传（`_as_id`）；
+- `tools/check_host_api.py` 增加对身份映射函数的检查。
+
+**没改的部分**：官方通道的事件本来就是 OneBot 形状
+（`post_type` / `message_type` / `group_id` / `user_id` / `message` / `sender` 都在），
+消息钩子无需改动；发送侧由宿主的 `SwitchableAdapter` 按「会话出现在哪条通道」路由，
+插件调 `ctx.send_group()` 即可。
+
+**遗留**：映射是人工的。没绑定时只能用合成 ID 配规则，这点在 README 里写清楚了。
 
 ---
 

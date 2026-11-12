@@ -6,7 +6,7 @@
 - 插件名：`proactive`（与 NeoBot 官方内置插件不重名）
 - 类型：**第三方插件**，放进 `plugins/` 目录即可，不改 NeoBot 源码
 - 依赖：NeoBot 本体（Python 3.13/3.14）+ `pydantic`（本体已自带）
-- 版本：1.4.0
+- 版本：1.5.0
 - 历次版本踩到的坑与修法：[CHANGELOG.md](CHANGELOG.md)
 
 ### 兼容性（重要）
@@ -87,6 +87,33 @@ Koishi 的 `Service`/`Context`、ChatLuna 的 room 与历史池，在 NeoBot 里
 
 `/help` 的过滤规则：普通用户只看得到 `permission=所有人` 的命令，
 超级管理员能看到全部（含本插件的 4 条）。
+
+### 官方机器人通道（NeoBot 2.1.0a8+）
+
+2.1.0a8 引入了「官方机器人」通道，并把新部署的默认值改成 `adapter.mode=official`。
+它对插件的影响只有一件事：**会话 ID 换了**。
+
+| | OneBot 通道 | 官方通道 |
+|---|---|---|
+| `group_id` / `user_id` | 真实 QQ 群号 / QQ 号（5~11 位） | **13 位合成 ID**（由 `openid` 映射而来） |
+| 与真实号码的关系 | 就是号码本身 | 没有 API 可以互转，只能**人工绑定** |
+
+NeoBot 提供管理员命令 `/linkqq`（@用户 + QQ 号）与 `/linkgroup`（当前群 + 群号）建立映射，
+落在 `data/user_qq_map.json`。本插件会读这份映射（`neobot_app.user_identity`）：
+
+- **规则里写真实 QQ 号/群号**：只要会话建立了映射就能命中——OneBot 环境本来就命中，
+  官方通道绑定后同样命中；
+- **规则里写合成 ID**：直接命中，不需要绑定；
+- 两种写法都配了规则时，按配置顺序取第一条精确匹配。
+
+所以官方通道上的推荐做法是：先让管理员用 `/linkqq`、`/linkgroup` 把常用群/人绑好，
+规则统一写真实号码——这样 OneBot 和官方两条通道**共用同一份配置**。
+
+没绑定也可以：把 `/proactive` 里显示的 `group:1234567890123` 那个 ID 填进配置即可。
+
+> 官方通道另有两条平台限制（与插件无关）：不能 @ 其他用户（@ 由宿主合成）、
+> 主动消息有条数频控。本插件发的是**纯文本**，不受 @ 限制；
+> 但频控在平台侧，官方通道上建议把 `cooldown_seconds` 调大。
 
 ---
 
@@ -239,9 +266,9 @@ privates = ["123456789"]
 | 项目 | 结果 |
 |---|---|
 | `tests/test_engine.py`（纯逻辑，19 条） | **19/19 通过** |
-| `tests/test_integration.py`（桩 SDK 集成，44 条） | **44/44 通过** |
+| `tests/test_integration.py`（桩 SDK 集成，52 条） | **52/52 通过** |
 | modloader 侧审计（2.0.1 / 2.1.0a3 双版本） | **12/12 项 API 两个版本都存在** |
-| app 侧审计（2.1.0a3 的 CommandContext / 卡片渲染 / 服务名） | **全部通过** |
+| app 侧审计（2.1.0a8：CommandContext / 身份映射 / 服务名） | **全部通过** |
 | `compileall`（全部源文件语法） | 通过 |
 | 状态持久化 | 实测：写入 `state.json` 后重启引擎可恢复 `enabled` 与历史池 |
 

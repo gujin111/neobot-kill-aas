@@ -14,6 +14,7 @@ import importlib.util
 import sys
 import tempfile
 import time
+import types
 from datetime import datetime
 from pathlib import Path
 
@@ -240,6 +241,13 @@ def _group_rule(module, **overrides):
     return rule
 
 
+def _private_rule(module, **overrides):
+    rule = module.PrivateRule()
+    for key, value in overrides.items():
+        setattr(rule, key, value)
+    return rule
+
+
 def _build_engine(module, tmpdir, services, **config_overrides):
     config = _make_config(module, **config_overrides)
     ctx = FakeCtx(tmpdir, services)
@@ -274,7 +282,7 @@ def _registered(ctx, name):
 
 def test_plugin_identity_and_export():
     assert PLUGIN.name == "proactive"
-    assert PLUGIN.version == "1.4.0"
+    assert PLUGIN.version == "1.5.0"
     assert PLUGIN.config_model.__name__ == "ProactiveConfig"
 
 
@@ -886,6 +894,106 @@ def test_normalize_id_list_coerces_and_drops():
     items, dropped = MODULE.normalize_id_list([123456, None, ""])
     assert items == ["123456"]
     assert dropped == 2
+
+
+# ---------------------------------------------------------------------------
+# 官方通道（2.1.0a8+）：合成 ID ↔ 真实 QQ 号/群号
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _fake_identity(**mapping):
+    """装一个假的 neobot_app.user_identity，模拟「管理员已用 /linkqq 建立映射」。"""
+    module = types.ModuleType("neobot_app.user_identity")
+    module.qq_for_user = lambda uid, channel=None: mapping.get(str(uid))
+    module.group_number_for = lambda gid, channel=None: mapping.get(str(gid))
+    module.synthetic_for_qq = lambda qq, channel=None: None
+    package = types.ModuleType("neobot_app")
+    package.user_identity = module
+    saved = {name: sys.modules.get(name) for name in ("neobot_app", "neobot_app.user_identity")}
+    sys.modules["neobot_app"] = package
+    sys.modules["neobot_app.user_identity"] = module
+    try:
+        yield module
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
+def test_resolve_aliases_maps_official_synthetic_id():
+    with _fake_identity(**{"1234567890123": 987654321}):
+        assert MODULE._resolve_aliases("private", "1234567890123") == ("987654321",)
+        assert MODULE._resolve_aliases("group", "1234567890123") == ("987654321",)
+
+
+def test_resolve_aliases_returns_empty_without_module():
+    for name in ("neobot_app", "neobot_app.user_identity"):
+        sys.modules.pop(name, None)
+    assert MODULE._resolve_aliases("private", "1234567890123") == ()
+
+
+def test_rule_matches_rule_written_with_real_qq():
+    """规则按真实 QQ 号写、事件里是官方合成 ID —— 靠映射命中。"""
+    with _tmpdir() as tmp:
+        engine, _, _ = _build_engine(
+            MODULE,
+            tmp,
+            FakeServices(),
+            privates=[_private_rule(MODULE, user_id="987654321", enable_idle_trigger=True)],
+        )
+        with _fake_identity(**{"1234567890123": 987654321}):
+            engine.record("private", "1234567890123", "在吗", "Someone")
+        assert "private:1234567890123" in engine._sessions
+        assert engine._sessions["private:1234567890123"].aliases == ("987654321",)
+
+
+def test_rule_matches_rule_written_with_synthetic_id():
+    with _tmpdir() as tmp:
+        engine, _, _ = _build_engine(
+            MODULE,
+            tmp,
+            FakeServices(),
+            privates=[_private_rule(MODULE, user_id="1234567890123", enable_idle_trigger=True)],
+        )
+        with _fake_identity(**{"1234567890123": 987654321}):
+            engine.record("private", "1234567890123", "在吗", "Someone")
+        assert "private:1234567890123" in engine._sessions
+
+
+def test_group_alias_participates_in_default_template_matching():
+    with _tmpdir() as tmp:
+        engine, _, _ = _build_engine(
+            MODULE,
+            tmp,
+            FakeServices(),
+            groups=[_group_rule(MODULE, guild_id="default", enable_idle_trigger=True)],
+            apply_default_group_configs=["555666777"],
+        )
+        with _fake_identity(**{"1234567890123": 555666777}):
+            engine.record("group", "1234567890123", "hi", "A")
+        assert "group:1234567890123" in engine._sessions
+
+
+def test_display_target_shows_real_id_when_mapped():
+    state = MODULE.SessionState(
+        kind="private", conversation_id="1234567890123", aliases=("987654321",)
+    )
+    text = MODULE._display_target(state)
+    assert "1234567890123" in text and "987654321" in text and "QQ" in text
+
+
+def test_display_target_falls_back_to_key():
+    state = MODULE.SessionState(kind="group", conversation_id="100")
+    assert MODULE._display_target(state) == "group:100"
+
+
+def test_as_id_passes_numeric_through_as_int():
+    assert MODULE._as_id("1234567890123") == 1234567890123
+    assert MODULE._as_id(" 42 ") == 42
+    assert MODULE._as_id("abc") == "abc"
 
 
 def _run_all() -> int:
