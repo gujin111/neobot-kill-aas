@@ -282,7 +282,7 @@ def _registered(ctx, name):
 
 def test_plugin_identity_and_export():
     assert PLUGIN.name == "proactive"
-    assert PLUGIN.version == "1.5.1"
+    assert PLUGIN.version == "1.5.2"
     assert PLUGIN.config_model.__name__ == "ProactiveConfig"
 
 
@@ -990,10 +990,34 @@ def test_display_target_falls_back_to_key():
     assert MODULE._display_target(state) == "group:100"
 
 
-def test_as_id_passes_numeric_through_as_int():
-    assert MODULE._as_id("1234567890123") == 1234567890123
-    assert MODULE._as_id(" 42 ") == 42
+def test_as_id_always_returns_string():
+    """发送时不做数值转换：一律字符串（非数字 ID 也就不会抛错）。"""
+    assert MODULE._as_id("1234567890123") == "1234567890123"
+    assert MODULE._as_id(1234567890123) == "1234567890123"
+    assert MODULE._as_id(" 42 ") == "42"
     assert MODULE._as_id("abc") == "abc"
+    assert isinstance(MODULE._as_id(42), str)
+
+
+def test_send_uses_string_conversation_id():
+    """兜底发送时传给适配器的必须是字符串。"""
+    async def scenario():
+        with _tmpdir() as tmp:
+            engine, ctx, _ = _build_engine(
+                MODULE,
+                tmp,
+                FakeServices(),
+                groups=[_group_rule(MODULE, guild_id="100", enable_idle_trigger=True)],
+            )
+            engine.record("group", "100", "hi", "Eve")
+            state = engine._sessions["group:100"]
+            state.last_message_time = time.time() - 200 * 60
+            await engine.tick()
+            assert len(ctx.sent) == 1
+            assert ctx.sent[0][1] == "100"
+            assert isinstance(ctx.sent[0][1], str)
+
+    asyncio.run(scenario())
 
 
 def test_proactive_status_shows_current_conversation_id():

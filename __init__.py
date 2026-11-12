@@ -54,7 +54,7 @@ PERM_SUPER_ADMIN = 2
 
 plugin = Plugin(
     "proactive",
-    version="1.5.1",
+    version="1.5.2",
     description="主动发言调度（空闲 / 活跃度触发）+ 指令图片总览",
     usage="提供 /proactive 系列主动发言管理指令；全部指令用本体的 /help 查看",
     config=ProactiveConfig,
@@ -294,13 +294,15 @@ def _current_conversation_lines(engine: Any, command_ctx: Any) -> list[str]:
     return lines
 
 
-def _as_id(value: Any) -> Any:
-    """会话 ID 优先按整数传给适配器；非数字的原样透传。"""
-    text = str(value).strip()
-    try:
-        return int(text)
-    except (TypeError, ValueError):
-        return text
+def _as_id(value: Any) -> str:
+    """会话 ID 一律按**字符串**传给适配器，不做数值转换。
+
+    依据（v2.1.0a8 源码）：
+    * `switchable.py:407` 用 `str(conversation.id)` 做会话路由键，字符串与整数等价；
+    * 官方通道解析 `group_openid` 时自己会 `int(synthetic)`（`official/identity.py`）；
+    * 非数字 ID（某些平台直接给 openid 字符串）不会在 `int()` 上抛错。
+    """
+    return str(value).strip()
 
 
 # ---------------------------------------------------------------------------

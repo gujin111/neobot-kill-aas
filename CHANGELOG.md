@@ -15,6 +15,7 @@
 | **1.4.0** | `e2caedd` | `/helpimg` 与本体 `/help` 语义重叠，删除并统一入口 |
 | **1.5.0** | — | 适配 2.1.0a8 官方机器人通道：会话 ID 变成 13 位合成 ID，按真实 QQ 号配的规则失效 |
 | **1.5.1** | — | 官方通道上「不知道该填哪个 ID」：未配规则时不跟踪会话，`/proactive` 看不到 ID |
+| **1.5.2** | — | 发送时把会话 ID 转 int 没有必要，且会让非数字 ID 走异常分支 |
 
 ---
 
@@ -266,6 +267,40 @@ visible = [
 这样即使一条规则都没配，也能在群里发一次 `/proactive` 就把 ID 拿到手。
 
 **没新增命令**：复用了 `/proactive`，避免又多一个要记的入口。
+
+---
+
+## 1.5.2
+
+### 改动：发送时不再把会话 ID 转成 int
+
+**原来的写法**：
+
+```python
+def _as_id(value):
+    try:
+        return int(str(value).strip())   # 数字就转 int
+    except (TypeError, ValueError):
+        return str(value).strip()        # 非数字原样返回
+```
+
+**问题**：这层转换没有收益，却有两个副作用——
+
+1. 非数字 ID（某些平台直接给 openid 字符串）会走异常分支，靠的是「抛了再兜」；
+2. 语义上自相矛盾：插件内部 ID 全程是字符串（配置、状态、路由键都是），
+   只在这一步变成 int。
+
+**改成**：`_as_id()` 一律返回字符串。
+
+**安全性依据**（对着 v2.1.0a8 源码确认过）：
+
+- `switchable.py:407` 用 `str(conversation.id)` 做会话路由键，字符串与整数等价；
+- 官方通道解析 `group_openid` 时自己会 `int(synthetic)`（`official/identity.py`）；
+- 两个适配器的 `send_group_msg` 只是把 `group_id` 放进 JSON payload，不做类型假设。
+
+**已知影响**：OneBot 的 JSON 里 `group_id` 现在会是一个字符串（v11 规范写的是 `int64`）。
+主流实现（NapCat / go-cqhttp 等）都容忍字符串；万一某个严格实现拒收，
+把 `_as_id` 改回 `int()` 即可，只有一行。
 
 ---
 
