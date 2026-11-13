@@ -27,8 +27,10 @@ from pathlib import Path
 REQUIRED_CONTEXT_FIELDS = {"service", "kind", "conv_id", "user_id"}
 #: 插件从宿主服务注册表里取的键
 REQUIRED_HOST_SERVICES = {"notification_hub", "reply_orchestrator"}
-#: 官方通道（2.1.0a8+）：合成 ID ↔ 真实 QQ 号/群号 的映射函数
-REQUIRED_IDENTITY_FUNCS = {"qq_for_user", "group_number_for", "synthetic_for_qq"}
+#: 官方通道身份映射：只列插件真正调用的。
+#: 2.1.0a9 删掉了 synthetic_for_qq、新增 openid_for_qq / openid_for_group，
+#: 但插件只需要 qq_for_user / group_number_for —— 这两个两版都在。
+REQUIRED_IDENTITY_FUNCS = {"qq_for_user", "group_number_for"}
 
 
 def _parse(path: Path) -> ast.Module | None:
