@@ -17,6 +17,7 @@
 | **1.5.1** | — | 官方通道上「不知道该填哪个 ID」：未配规则时不跟踪会话，`/proactive` 看不到 ID |
 | **1.5.2** | — | 发送时把会话 ID 转 int 没有必要，且会让非数字 ID 走异常分支 |
 | **1.6.0** | — | 官方通道下没人能替别人查私聊 ID，`/proactive` 只对超管开放等于堵死私聊规则 |
+| **1.7.0** | — | a9 把官方通道的会话 ID 从 13 位合成号改成 openid 字符串 |
 
 ---
 
@@ -336,6 +337,49 @@ bot 看不到对方的真实 QQ 号，`/proactive` 又只对超级管理员开�
 
 **权限模型的取舍**：`/proactive` 不再算「核心指令」。但它对普通用户只吐一行自己的 ID，
 既不是管理动作也不泄露全局状态——这是官方通道上唯一可行的自助发现方式。
+
+---
+
+## 1.7.0
+
+### 适配 NeoBot v2.1.0a9：官方通道的会话 ID 从「合成号」变成「openid」
+
+**背景**：a9 把官方事件里的 `group_id` / `user_id` 直接改成 `group_openid` /
+`member_openid`（`official/events.py`），13 位合成号降级为**兼容遗留**
+（`official/identity.py` 注释：「旧数据库、队列、定时任务里残留的 13 位合成号仍可反查成 openid」）。
+
+也就是说，官方通道上的会话 ID 从 **13 位纯数字** 变成了 **非数字的 openid 字符串**。
+
+**结论：插件代码不需要改，但这次是运气。**
+
+1.5.2 把发送时的 `int()` 转换去掉了，ID 全程按字符串透传——正好接住这次变化。
+如果当时保留 `int()`，虽然异常分支会兜住（`int("A1B2…")` 抛错后回落原文），
+但语义上就成了「靠异常工作」。
+
+**逐项核对结果**：
+
+| 依赖点 | a9 状态 |
+|---|---|
+| `notification_hub.publish` 签名 | 未变，`_deliver` 直接可用 |
+| `CommandContext` 字段 | 未变 |
+| `user_identity.qq_for_user` / `group_number_for` | 保留；内部 `_local_candidates` 同时接受 openid 与旧合成号 |
+| 官方发送 `send_group_msg(group_id)` | 签名从 `int` 放宽到 `int \| str`，内部 `_openid()` 反查 |
+| modloader（`Plugin` / `RuntimePluginContext`） | 42 / 47 个成员，插件用到的 12 项全在 |
+| `user_identity.synthetic_for_qq` | **已删除** —— 但插件从未使用它 |
+
+**审计工具的修正**：`check_host_api.py` 原来把 `synthetic_for_qq` 列进必需函数，
+在 a9 上报了假阳性。改成只列插件真正调用的 `qq_for_user` / `group_number_for`。
+
+**新增行为（宿主侧，插件自动受益）**：
+
+- **双通道去重**：已 `/linkgroup` 且两通道都在线的群，事件交给 OneBot、发送按群号切通道。
+  这类群的会话 ID 是真实群号，规则写真实群号直接生效。
+- **后台主动消息显式走 official**：`notification_hub.publish` 不再依赖被动回退，
+  插件的主动发言因此能真正送达。
+- 新增 `/get openid`、`/get groupid`（所有人）与 `/unlinkqq`、`/unlinkgroup`（超管）。
+
+**新增 3 条用例**：openid 风格的会话 ID 能命中真实群号规则、发送时 openid 原样透传、
+openid 含非数字字符时不被数值转换弄坏。
 
 ---
 

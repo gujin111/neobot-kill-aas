@@ -303,7 +303,7 @@ def _registered(ctx, name):
 
 def test_plugin_identity_and_export():
     assert PLUGIN.name == "proactive"
-    assert PLUGIN.version == "1.6.0"
+    assert PLUGIN.version == "1.7.0"
     assert PLUGIN.config_model.__name__ == "ProactiveConfig"
 
 
@@ -1128,6 +1128,52 @@ def test_proactive_status_self_view_mentions_mapping_when_bound():
             assert "已绑定" in result
 
     asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# 2.1.0a9：官方事件直接给 openid 字符串（不再走 13 位合成号）
+# ---------------------------------------------------------------------------
+
+
+def test_openid_style_conversation_id_matches_real_group_number():
+    """非数字的 openid 作为会话 ID 时，映射匹配必须照样成立。"""
+    with _tmpdir() as tmp:
+        engine, _, _ = _build_engine(
+            MODULE,
+            tmp,
+            FakeServices(),
+            groups=[_group_rule(MODULE, guild_id="987654321", enable_idle_trigger=True)],
+        )
+        with _fake_identity(**{"A1B2C3D4E5F6G7": 987654321}):
+            engine.record("group", "A1B2C3D4E5F6G7", "hi", "A")
+        assert "group:A1B2C3D4E5F6G7" in engine._sessions
+        assert engine._sessions["group:A1B2C3D4E5F6G7"].aliases == ("987654321",)
+
+
+def test_send_passes_openid_string_through_untouched():
+    async def scenario():
+        with _tmpdir() as tmp:
+            engine, ctx, _ = _build_engine(
+                MODULE,
+                tmp,
+                FakeServices(),
+                groups=[_group_rule(MODULE, guild_id="A1B2C3D4E5F6G7", enable_idle_trigger=True)],
+            )
+            engine.record("group", "A1B2C3D4E5F6G7", "hi", "A")
+            state = engine._sessions["group:A1B2C3D4E5F6G7"]
+            state.last_message_time = time.time() - 200 * 60
+            await engine.tick()
+            assert len(ctx.sent) == 1
+            assert ctx.sent[0][1] == "A1B2C3D4E5F6G7"
+            assert isinstance(ctx.sent[0][1], str)
+
+    asyncio.run(scenario())
+
+
+def test_openid_id_is_not_mangled_by_int_conversion():
+    """openid 含非数字字符时也不能被数值转换弄坏。"""
+    assert MODULE._as_id("A1B2-C3D4_E5F6") == "A1B2-C3D4_E5F6"
+    assert MODULE._as_id("  A1B2  ") == "A1B2"
 
 
 def _run_all() -> int:

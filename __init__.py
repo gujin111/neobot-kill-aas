@@ -54,7 +54,7 @@ PERM_SUPER_ADMIN = 2
 
 plugin = Plugin(
     "proactive",
-    version="1.6.0",
+    version="1.7.0",
     description="主动发言调度（空闲 / 活跃度触发）+ 指令图片总览",
     usage="提供 /proactive 系列主动发言管理指令；全部指令用本体的 /help 查看",
     config=ProactiveConfig,
