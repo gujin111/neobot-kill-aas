@@ -77,24 +77,24 @@ def test_activity_score_decays_with_staleness():
     assert stale < 0.05
 
 
-def test_threshold_moves_toward_upper_limit_when_upper_is_higher():
+def test_threshold_moves_toward_target_when_target_is_higher():
     scorer = engine.ActivityScorer()
-    # 下限 < 上限：越聊越克制（阈值升高）
+    # 初始阈值 < 趋向值：越聊越克制（阈值升高）
     assert scorer.adjust_threshold(0.20, 0.20, 0.90) > 0.20
 
 
-def test_threshold_moves_toward_lower_limit_when_upper_is_lower():
+def test_threshold_moves_toward_target_when_target_is_lower():
     scorer = engine.ActivityScorer()
-    # 下限 > 上限：越聊越积极（阈值降低）
+    # 初始阈值 > 趋向值：越聊越积极（阈值降低）
     assert scorer.adjust_threshold(0.90, 0.90, 0.20) < 0.90
 
 
-def test_threshold_stays_when_limits_equal():
+def test_threshold_stays_when_initial_equals_target():
     scorer = engine.ActivityScorer()
     assert scorer.adjust_threshold(0.85, 0.85, 0.85) == 0.85
 
 
-def test_threshold_never_leaves_bounds():
+def test_threshold_never_leaves_initial_target_bounds():
     scorer = engine.ActivityScorer()
     value = 0.89
     for _ in range(50):

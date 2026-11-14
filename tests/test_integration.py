@@ -303,7 +303,7 @@ def _registered(ctx, name):
 
 def test_plugin_identity_and_export():
     assert PLUGIN.name == "proactive"
-    assert PLUGIN.version == "1.7.0"
+    assert PLUGIN.version == "1.7.1"
     assert PLUGIN.config_model.__name__ == "ProactiveConfig"
 
 
@@ -421,6 +421,22 @@ def test_record_ignores_conversations_without_rule():
         engine, _, _ = _build_engine(MODULE, tmp, FakeServices(), groups=[])
         engine.record("group", "1", "hello")
         assert engine._sessions == {}
+
+
+def test_history_message_limit_above_64_is_honored():
+    with _tmpdir() as tmp:
+        engine, _, _ = _build_engine(
+            MODULE,
+            tmp,
+            FakeServices(),
+            groups=[_group_rule(MODULE, guild_id="100", history_message_limit=100)],
+        )
+        for i in range(120):
+            engine.record("group", "100", f"m{i}", "Bob")
+        state = engine._sessions["group:100"]
+        assert len(state.messages) == 100
+        assert "m20" in state.messages[0]
+        assert "m119" in state.messages[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -576,6 +592,47 @@ def test_speech_blocked_gives_up_without_starting_pipeline():
                 f"failures={state.failures} hub={len(hub.published)} "
                 f"orch={len(orchestrator.started)} sent={len(ctx.sent)} enabled={engine.enabled}"
             )
+
+    asyncio.run(scenario())
+
+
+def test_failure_cooldown_starts_after_max_retry_attempts():
+    async def scenario():
+        with _tmpdir() as tmp:
+            class CountingBlockedHub(FakeNotificationHub):
+                def __init__(self):
+                    super().__init__(blocked=True)
+                    self.attempts = 0
+
+                async def publish(self, **kwargs):
+                    self.attempts += 1
+                    return await super().publish(**kwargs)
+
+            hub = CountingBlockedHub()
+            engine, _, _ = _build_engine(
+                MODULE,
+                tmp,
+                FakeServices(notification_hub=hub),
+                groups=[_group_rule(MODULE, guild_id="100", enable_idle_trigger=True)],
+                failure_cooldown_seconds=3600,
+                max_retry_attempts=3,
+            )
+            engine.record("group", "100", "hello", "Bob")
+            state = engine._sessions["group:100"]
+            state.last_message_time = time.time() - 200 * 60
+
+            await engine.tick()
+            assert (hub.attempts, state.failures) == (1, 1)
+            await engine.tick()
+            assert (hub.attempts, state.failures) == (2, 2), "未达到上限前应立即重试"
+            await engine.tick()
+            assert (hub.attempts, state.failures) == (3, 3)
+            await engine.tick()
+            assert (hub.attempts, state.failures) == (3, 3), "达到上限后应进入冷却"
+
+            state.failure_cooldown_until = 0
+            await engine.tick()
+            assert (hub.attempts, state.failures) == (4, 4), "冷却结束后应继续尝试"
 
     asyncio.run(scenario())
 
