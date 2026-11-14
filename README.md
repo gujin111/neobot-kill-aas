@@ -11,7 +11,7 @@
 
 ### 兼容性（重要）
 
-只使用**跨版本都存在**的接口，因此同一份代码在 2.0.1 与 2.1.0a3 上都能跑：
+只使用**跨版本都存在**的接口，因此同一份代码在 2.0.1 到 2.1.0a9 上都能跑：
 
 | 用途 | 本插件用的 | 没有使用的（仅高版本有） |
 |---|---|---|
@@ -25,16 +25,19 @@
 | modloader 版本 | 结论 | 依据 |
 |---|---|---|
 | 2.0.1（PyPI 稳定版） | ✅ 通过 | `tools/check_compat.py` 12 项 API 全部存在 |
-| 2.1.0a3（最新预发布） | ✅ 通过，**无需改代码** | 同上；另加 app 侧契约审计 |
-| 2.1.0a3 的 app 侧 | ✅ 通过 | `CommandContext` 字段、`send_image_bytes`、`render_card_*`、宿主服务名均未变 |
+| 2.1.0a3 | ✅ 通过，无需改代码 | 同上 |
+| 2.1.0a9（最新） | ✅ 通过，无需改代码 | 同上；app 侧另跑 `check_host_api.py` |
 
-2.1.0a3 相对 2.0.1 的差异只影响“能不能用新写法”，不影响本插件：
+高版本相对 2.0.1 的差异只影响「能不能用新写法」，不影响本插件：
 
-- `Plugin` 新增 `event / action / resource / guide / view / surface`（只增不减）
-- `RuntimePluginContext` 成员数不变
-- 依赖注入的约定名、消息匹配逻辑均未变；`_injected_value` 只是**新增**了两种注入
+- `Plugin` 持续**只增**：2.1.0a3 加了 `event / action / resource / guide / view / surface`
+- `RuntimePluginContext` 成员数一直是 47
+- 依赖注入的约定名、消息匹配逻辑均未变；`_injected_value` 只**新增**了注入种类
 - `plugin.contract.json` / `[sdk]` **不在加载路径里**，loader 仍只读 `plugin.toml` 的
   `enabled` / `priority` / `[config]`
+
+2.1.0a9 唯一的实质变化是官方通道的会话 ID 从 13 位合成号改成 `openid` 字符串，
+详见第二节「官方机器人通道」。
 
 另外注意：`plugin.toml` 里的 `version` 必须与 `Plugin(version=...)` 完全一致，
 否则 modloader 会以「plugin.toml version 与 Plugin(...) version 不一致」拒绝加载。
@@ -55,7 +58,7 @@ Koishi 的 `Service`/`Context`、ChatLuna 的 room 与历史池，在 NeoBot 里
 | ChatLuna 的 room 与历史池 | 自建会话状态 + `state.json` 持久化 |
 | `session.send()` | `notification_hub.publish()` → `reply_orchestrator` → `ctx.send_group` |
 | Koishi 命令树 | 宿主命令表 `ctx.app_commands`（`/` 前缀、权限等级 0/1/2） |
-| `h.text()` / `h.image()` | `html_card` 卡片 + `Reply.image()` |
+| `h.text()` / `h.image()` | 纯文本，经宿主的回复管线发送（1.4.0 起不再渲染卡片） |
 
 原插件里依赖 ChatLuna 才有的部分（每群一个 proactive room、图片本地缓存与 `[图片:hash]` 标记）
 在 NeoBot 上没有对应概念，未移植，见文末「与上游的差异」。
@@ -314,7 +317,7 @@ privates = ["123456789"]
 |---|---|
 | `tests/test_engine.py`（纯逻辑，19 条） | **19/19 通过** |
 | `tests/test_integration.py`（桩 SDK 集成，61 条） | **61/61 通过** |
-| modloader 侧审计（2.0.1 / 2.1.0a3 双版本） | **12/12 项 API 两个版本都存在** |
+| modloader 侧审计（2.0.1 / 2.1.0a3 / 2.1.0a9） | **12/12 项 API 各版本都存在** |
 | app 侧审计（2.1.0a9：CommandContext / 身份映射 / 服务名） | **全部通过** |
 | `compileall`（全部源文件语法） | 通过 |
 | 状态持久化 | 实测：写入 `state.json` 后重启引擎可恢复 `enabled` 与历史池 |
@@ -331,7 +334,8 @@ privates = ["123456789"]
 `RuntimePluginContext` 的真实成员表，再对照本插件用到的每个 `plugin.<attr>` /
 `ctx.<attr>` / `getattr(ctx, "...")` 逐个验证存在性。支持一次传多个 `--ref` 做矩阵对比。
 
-`tools/check_host_api.py`（app 侧）固定 `CommandContext` 字段和宿主服务名——这些漂了通常只在运行时才炸。
+`tools/check_host_api.py`（app 侧）固定 `CommandContext` 字段、官方通道身份映射函数
+（`qq_for_user` / `group_number_for`）与宿主服务名——这些漂了通常只在运行时才炸。
 
 ```bash
 # modloader：对着已安装的检查，或对比多个版本
