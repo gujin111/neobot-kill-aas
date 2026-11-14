@@ -149,14 +149,14 @@ class ActivityScorer:
     def should_trigger(self, score: float, threshold: float) -> bool:
         return score >= threshold
 
-    def adjust_threshold(self, current: float, initial: float, target: float) -> float:
-        """按初始阈值与趋向值之差的一成步进推进当前阈值。
+    def adjust_threshold(self, current: float, lower: float, upper: float) -> float:
+        """按上下限之差的一成步进推进当前阈值。
 
-        初始阈值 < 趋向值 → 每次触发后阈值升高（越聊越克制）；
-        初始阈值 > 趋向值 → 每次触发后阈值降低（越聊越积极）。
+        下限 < 上限 → 每次触发后阈值升高（越聊越克制）；
+        下限 > 上限 → 每次触发后阈值降低（越聊越积极）。
         """
-        step = (target - initial) * 0.1
-        return _clamp(current + step, min(initial, target), max(initial, target))
+        step = (upper - lower) * 0.1
+        return _clamp(current + step, min(lower, upper), max(lower, upper))
 
 
 # ---------------------------------------------------------------------------

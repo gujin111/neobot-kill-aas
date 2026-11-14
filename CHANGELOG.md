@@ -18,7 +18,6 @@
 | **1.5.2** | — | 发送时把会话 ID 转 int 没有必要，且会让非数字 ID 走异常分支 |
 | **1.6.0** | — | 官方通道下没人能替别人查私聊 ID，`/proactive` 只对超管开放等于堵死私聊规则 |
 | **1.7.0** | — | a9 把官方通道的会话 ID 从 13 位合成号改成 openid 字符串 |
-| **1.7.1** | — | 设置页提示重写；`history_message_limit` 真正支持到 1000；失败重试改为「失败 N 次后冷却」 |
 
 ---
 
@@ -381,75 +380,6 @@ bot 看不到对方的真实 QQ 号，`/proactive` 又只对超级管理员开�
 
 **新增 3 条用例**：openid 风格的会话 ID 能命中真实群号规则、发送时 openid 原样透传、
 openid 含非数字字符时不被数值转换弄坏。
-
----
-
-## 1.7.1
-
-这一版没有新功能，主要是把设置页里说得含糊的提示重写了一遍；行为上只动了两处：
-失败重试按字面改成「失败 N 次后冷却」，以及 `history_message_limit` 不再被 64 条缓存上限截断。
-
-### `work_hours`：格式说明补齐
-
-**现象**：群聊规则原来有一句「如 1,3-5,8-19，支持 22-2 跨零点」，私聊规则只有
-「工作时间段，留空表示全天」。用户看不出只支持整点、区间含不含端点、跨零点怎么算。
-更麻烦的是写错不会报错：`9:30-18:30`、中文逗号、`24` 这类写法会按「全天」处理。
-
-**根因**：`parse_work_hours()` 只认整点、英文逗号和 `起-止` 区间；无法识别的片段
-被静默忽略，全部无效时返回 `None`，等于不限时段。原提示没有把这些边界写出来。
-
-**修复**：群聊/私聊共用 `_WORK_HOURS_HELP`，写清 0-23 整点、英文逗号、区间含两端、
-`22-2` 跨零点、留空全天，以及「无法识别即忽略，全部无效按全天」。面板输入框补了
-`如 8-19,22-2` 的 placeholder。解析行为没改，避免旧配置因为格式错误突然失效。
-
-### 其他容易误读的设置项
-
-| 设置项 | 原来的问题 | 现在的提示 |
-|---|---|---|
-| `activity_lower_limit` / `activity_upper_limit` | 叫「灵敏度」「下限/上限」，实际是初始阈值和阈值趋向值；`lower > upper` 时阈值向下走 | 统一为「初始触发阈值」「阈值趋向值」，写明每次成功触发后移动差值的 10% |
-| `guild_id` / `user_id` / `apply_default_*` | 只写「群号/用户 ID」，没说明官方通道要填 openid/会话 ID；默认模板的前置条件也没写 | 改成「群号或会话 ID」「QQ 号或会话 ID」，补 `/proactive`、`/linkgroup`、`/linkqq`，说明 id=`default` 规则和精确匹配优先 |
-| `idle_interval_minutes` | 「空闲触发间隔」听起来像固定周期 | 写明按「最近消息或上次主动发言（取较晚者）」计时；新私聊规则要先收到一条消息 |
-| `enabled` | 看起来是总开关，实际加载时会被 `state.json` 覆盖 | 写明只是首次运行的初始值，之后以 `/proactiveon`、`/proactiveoff` 的运行状态为准 |
-| `verbose_log` | 说「完整判断快照」，实际只是多打一行记录日志 | 改成实际行为；`debug_log` 也补了「warning 始终输出」 |
-| 提示词模板 / `tick_seconds` / `cooldown_seconds` | 模板没列变量；扫描间隔容易被当成发言间隔；冷却没区分成功/失败 | 列了变量和空值规则；写明 `tick_seconds` 是检查频率、`cooldown_seconds` 只管成功触发 |
-
-`guaranteed_trigger_minutes` 和 `activity_message_interval` 也补了前置条件：都只在
-`enable_activity_trigger` 打开时生效；保底按「最近消息或上次主动发言」计时，所以群里
-一直有新消息时不会触发。
-
-### `history_message_limit` 实际只缓存 64 条
-
-**现象**：把 `history_message_limit` 从 20 调到 100，`{history}` 里最多还是 64 条。
-
-**根因**：`SessionState.messages` 是 `deque(maxlen=64)`；`record()` 虽然按配置裁剪，
-但 deque 本身先丢掉了超过 64 条的部分。`_load()` 恢复状态时也写死了 64。
-
-**修复**：两处都改成 `maxlen=1000`，与字段的 5–1000 范围一致。默认 20 不变；
-只有主动调大才会多占内存和 `state.json` 空间。新增用例：上限 100、写 120 条，保留 100 条。
-
-### `max_retry_attempts` 现在真的是「失败 N 次后冷却」
-
-**现象**：默认 `max_retry_attempts=3`，但第一次投递失败后，下一轮就不再尝试，
-直接进入 `failure_cooldown_seconds`；这个配置看起来完全没起作用。
-
-**根因**：`_evaluate()` 里无条件检查 `now < failure_cooldown_until`，而每次失败都会写
-这个时间戳。`tick()` 里虽然有一个 `failures >= max_retry_attempts` 的跳过条件，
-但 `_evaluate()` 自己会提前返回，所以两条路径结果一样——第一次失败就冷却。
-
-**修复**：抽出 `_failure_cooldown_active()`，同时要求
-`failures >= max(1, max_retry_attempts)` 且仍在冷却期。现在前 N-1 次失败会在
-触发条件仍满足时继续尝试，第 N 次失败后才暂停 `failure_cooldown_seconds`；成功一次清零，
-`0` 按 `1` 处理。新增用例覆盖「前两次失败继续重试、第三次后暂停、冷却结束后继续」。
-
-### 验证
-
-- `python tests/test_engine.py` → 19/19
-- `python tests/test_integration.py` → 63/63（新增 2 条：失败重试、历史消息上限）
-- `python -m compileall __init__.py config.py engine.py` → 通过
-- 用 pydantic 2.14 实导入 `config.py`，确认两个 `work_hours` 的 `description` 和
-  `placeholder` 都进入 schema
-
-`README.md` 与 `plugin.toml` 的注释同步到了这一版。
 
 ---
 

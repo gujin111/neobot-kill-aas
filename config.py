@@ -8,23 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from .engine import DEFAULT_ACTIVITY_PROMPT, DEFAULT_IDLE_PROMPT
 
-_LIMIT_HISTORY = "历史消息条数上限（5-1000）：同时作为每会话缓存上限与 {history} 最大注入条数"
-
-_WORK_HOURS_HELP = (
-    "工作时间段：按服务器本地时间的小时判断，只能填 0-23 的整点（午夜写 0，不要写 24）。"
-    "用英文逗号分隔，可写单个小时或「起-止」区间（含两端，如 8-19 覆盖 8:00–19:59）；"
-    "22-2 表示跨零点。例如 1,3-5,8-19。留空即全天。"
-    "无法识别的片段会被忽略；全部无法识别时按全天处理。"
-)
-
-_IDLE_INTERVAL_HELP = (
-    "空闲触发间隔（分钟）：距最近一条消息（或上次主动发言，取较晚者）超过这么久才触发；不是固定周期"
-)
-
-_PROMPT_HELP = (
-    "可用变量：{history} {time} {date} {group_name} {user_name} {idle_minutes}；"
-    "未知变量会被替换为空（{user_name} 目前恒为空）"
-)
+_LIMIT_HISTORY = "历史消息条数上限：同时作为每会话缓存上限与 {history} 最大注入条数"
 
 
 def normalize_rule_list(value: Any, id_field: str) -> tuple[list[dict[str, Any]], int]:
@@ -93,64 +77,35 @@ class GroupRule(BaseModel):
 
     guild_id: str = Field(
         default="default",
-        description=(
-            "群号或会话 ID；填 default 表示默认模板，需要在「默认模板适用群」里列出才会生效。"
-            "官方通道可用 /proactive 查看当前会话 ID，或用 /linkgroup 绑定真实群号"
-        ),
+        description="群号；填 default 表示这是一份默认模板，需要在「默认模板适用群」里列出群号才会生效",
     )
     enable_activity_trigger: bool = Field(default=False, description="启用活跃度触发：群里聊得热时主动接话")
     activity_lower_limit: float = Field(
-        default=0.85,
-        ge=0.0,
-        le=1.0,
-        description="初始触发阈值（0~1）：活跃度分数达到它才触发，数值越小越容易触发；也是阈值自适应的起点",
+        default=0.85, ge=0.0, le=1.0, description="初始触发灵敏度（0~1，越小越容易触发）"
     )
     activity_upper_limit: float = Field(
         default=0.85,
         ge=0.0,
         le=1.0,
-        description=(
-            "阈值趋向值：每次成功触发后，当前阈值向它移动两者差值的 10%；"
-            "大于初始阈值则越聊越克制，小于则越聊越积极，相等则固定"
-        ),
+        description="灵敏度趋向值：大于下限则越聊越克制，小于下限则越聊越积极，相等则固定阈值",
     )
     activity_message_interval: int = Field(
-        default=20,
-        ge=0,
-        description=(
-            "消息计数兜底间隔（仅在启用活跃度触发时生效）：自上次成功触发后攒够这么多条消息，"
-            "即使活跃度不够也触发一次，0 表示关闭"
-        ),
+        default=20, ge=0, description="消息计数兜底间隔：攒够这么多条消息，即使活跃度不够也触发一次，0 表示关闭"
     )
     guaranteed_trigger_minutes: int = Field(
-        default=0,
-        ge=0,
-        description=(
-            "保底触发间隔（分钟）：仅在启用活跃度触发时生效；"
-            "距最近一条消息或上次主动发言（取较晚者）超过这么久仍未触发时，强制触发一次，0 表示关闭"
-        ),
+        default=0, ge=0, description="保底触发间隔（分钟）：超过这么久没触发过就强制触发一次，0 表示关闭"
     )
     enable_idle_trigger: bool = Field(default=False, description="启用空闲触发：长时间没人说话时主动开话题")
-    idle_interval_minutes: int = Field(default=180, ge=1, description=_IDLE_INTERVAL_HELP)
+    idle_interval_minutes: int = Field(default=180, ge=1, description="空闲触发间隔（分钟）")
     idle_enable_jitter: bool = Field(default=True, description="空闲触发抖动：在间隔上下浮动 5%~10%，避免时间过于固定")
     history_message_limit: int = Field(default=20, ge=5, le=1000, description=_LIMIT_HISTORY)
-    cooldown_seconds: int = Field(
-        default=30,
-        ge=0,
-        le=3600,
-        description="成功触发后的冷却时间（秒）：同一会话在这段时间内不会再次自动触发；失败重试见 failure_cooldown_seconds",
-    )
+    cooldown_seconds: int = Field(default=30, ge=0, le=3600, description="触发后冷却时间（秒）")
     work_hours: str = Field(
         default="",
-        description=_WORK_HOURS_HELP,
-        json_schema_extra={"placeholder": "如 8-19,22-2"},
+        description="工作时间段（小时 0-23）：如 1,3-5,8-19，支持 22-2 跨零点；留空表示全天",
     )
-    activity_prompt_template: str = Field(
-        default=DEFAULT_ACTIVITY_PROMPT, description="活跃度触发提示词模板。" + _PROMPT_HELP
-    )
-    idle_prompt_template: str = Field(
-        default=DEFAULT_IDLE_PROMPT, description="空闲触发提示词模板。" + _PROMPT_HELP
-    )
+    activity_prompt_template: str = Field(default=DEFAULT_ACTIVITY_PROMPT, description="活跃度触发提示词模板")
+    idle_prompt_template: str = Field(default=DEFAULT_IDLE_PROMPT, description="空闲触发提示词模板")
 
 
 class PrivateRule(BaseModel):
@@ -158,99 +113,41 @@ class PrivateRule(BaseModel):
 
     user_id: str = Field(
         default="default",
-        description=(
-            "QQ 号或会话 ID（官方通道通常是 openid 字符串）；"
-            "填 default 表示默认模板，需要在「默认模板适用用户」里列出才会生效。"
-            "可用 /proactive 查看当前会话 ID，或用 /linkqq 绑定真实 QQ 号"
-        ),
+        description="用户 ID；填 default 表示这是一份默认模板，需要在「默认模板适用用户」里列出才会生效",
     )
-    enable_idle_trigger: bool = Field(
-        default=False, description="启用空闲触发：长时间没人说话时主动开话题（私聊只支持这一种触发）"
-    )
-    idle_interval_minutes: int = Field(
-        default=180, ge=1, description=_IDLE_INTERVAL_HELP + "；新私聊规则需先收到一条消息才会开始计时"
-    )
-    idle_enable_jitter: bool = Field(default=True, description="空闲触发抖动：在间隔上下浮动 5%~10%，避免时间过于固定")
+    enable_idle_trigger: bool = Field(default=False, description="启用空闲触发")
+    idle_interval_minutes: int = Field(default=180, ge=1, description="空闲触发间隔（分钟）")
+    idle_enable_jitter: bool = Field(default=True, description="空闲触发抖动")
     history_message_limit: int = Field(default=20, ge=5, le=1000, description=_LIMIT_HISTORY)
-    cooldown_seconds: int = Field(
-        default=30,
-        ge=0,
-        le=3600,
-        description="成功触发后的冷却时间（秒）：同一会话在这段时间内不会再次自动触发；失败重试见 failure_cooldown_seconds",
-    )
-    work_hours: str = Field(
-        default="",
-        description=_WORK_HOURS_HELP,
-        json_schema_extra={"placeholder": "如 8-19,22-2"},
-    )
-    idle_prompt_template: str = Field(
-        default=DEFAULT_IDLE_PROMPT, description="空闲触发提示词模板。" + _PROMPT_HELP
-    )
+    cooldown_seconds: int = Field(default=30, ge=0, le=3600, description="触发后冷却时间（秒）")
+    work_hours: str = Field(default="", description="工作时间段，留空表示全天")
+    idle_prompt_template: str = Field(default=DEFAULT_IDLE_PROMPT, description="空闲触发提示词模板")
 
 
 class ProactiveConfig(BaseModel):
     """主动发言 + 指令图片中心的全部配置。"""
 
     # --- 总开关 ---
-    enabled: bool = Field(
-        default=True,
-        description=(
-            "主动发言总开关的初始值：只在首次运行或没有 state.json 时生效；"
-            "之后以 /proactiveon、/proactiveoff 持久化的运行状态为准（可用 /proactive 查看当前状态）"
-        ),
-    )
+    enabled: bool = Field(default=True, description="主动发言总开关（也可以用 /proactiveon、/proactiveoff 在运行期切换）")
 
     # --- 触发层 ---
     apply_default_group_configs: list[str] = Field(
-        default_factory=list,
-        description=(
-            "默认群聊模板适用的群号/会话 ID 列表；"
-            "只有 groups 中存在 guild_id=\"default\" 的规则时才生效；精确群号规则优先于默认模板"
-        ),
+        default_factory=list, description="默认群聊模板适用的群号列表"
     )
     apply_default_private_configs: list[str] = Field(
-        default_factory=list,
-        description=(
-            "默认私聊模板适用的 QQ 号/会话 ID 列表；"
-            "只有 privates 中存在 user_id=\"default\" 的规则时才生效；精确用户规则优先于默认模板"
-        ),
+        default_factory=list, description="默认私聊模板适用的用户 ID 列表"
     )
-    groups: list[GroupRule] = Field(
-        default_factory=list, description="群聊规则列表：每个群一条；没有命中规则的群不会被记录，也不会主动发言"
-    )
-    privates: list[PrivateRule] = Field(
-        default_factory=list,
-        description="私聊规则列表：私聊只支持空闲触发；没有命中规则的用户不会被记录，也不会主动发言",
-    )
-    tick_seconds: int = Field(
-        default=20,
-        ge=5,
-        le=600,
-        description="调度器检查触发条件的频率（秒），不是主动发言的间隔；调小更及时，调大更省资源",
-    )
+    groups: list[GroupRule] = Field(default_factory=list, description="群聊规则列表")
+    privates: list[PrivateRule] = Field(default_factory=list, description="私聊规则列表")
+    tick_seconds: int = Field(default=20, ge=5, le=600, description="调度器扫描间隔（秒）")
 
     # --- 失败处理 ---
-    failure_cooldown_seconds: int = Field(
-        default=60, ge=0, description="失败达到 max_retry_attempts 次后，后续触发尝试暂停的时间（秒）"
-    )
-    max_retry_attempts: int = Field(
-        default=3,
-        ge=0,
-        description=(
-            "自上次成功以来失败达到 N 次后，后续尝试在 failure_cooldown_seconds 内暂停；"
-            "未达到时下一轮仍会尝试，0 按 1 处理"
-        ),
-    )
+    failure_cooldown_seconds: int = Field(default=60, ge=0, description="主动发言失败后的会话冷却时间（秒）")
+    max_retry_attempts: int = Field(default=3, ge=0, description="连续失败多少次后进入冷却")
 
     # --- 日志 ---
-    debug_log: bool = Field(default=False, description="输出触发成功/失败、跳过原因等 info 日志（warning 始终输出）")
-    verbose_log: bool = Field(
-        default=False,
-        description=(
-            "输出与 debug_log 相同的 info 日志，并额外输出每条消息的「记录消息…共 N 条」；"
-            "排查用，平时建议关闭"
-        ),
-    )
+    debug_log: bool = Field(default=False, description="输出触发原因等调试日志")
+    verbose_log: bool = Field(default=False, description="输出每条消息的完整判断快照（排查用，平时建议关闭）")
 
     # --- 宽松输入 -----------------------------------------------------------
     # 面板保存走 model_validate，插件加载也走同一套模型；校验前先把宽松写法

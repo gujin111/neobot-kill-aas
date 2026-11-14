@@ -1,6 +1,6 @@
 [project]
 name = "neobot-plugin-proactive"
-version = "1.7.1"
+version = "1.0.0"
 description = "NeoBot 第三方插件：主动发言调度 + 指令图片总览"
 requires-python = ">=3.13"
 dependencies = ["pydantic>=2,<3"]

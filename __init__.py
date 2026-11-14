@@ -54,7 +54,7 @@ PERM_SUPER_ADMIN = 2
 
 plugin = Plugin(
     "proactive",
-    version="1.7.1",
+    version="1.7.0",
     description="主动发言调度（空闲 / 活跃度触发）+ 指令图片总览",
     usage="提供 /proactive 系列主动发言管理指令；全部指令用本体的 /help 查看",
     config=ProactiveConfig,
@@ -197,7 +197,7 @@ class SessionState:
     kind: str
     conversation_id: str
     timestamps: deque[float] = field(default_factory=lambda: deque(maxlen=400))
-    messages: deque[str] = field(default_factory=lambda: deque(maxlen=1000))
+    messages: deque[str] = field(default_factory=lambda: deque(maxlen=64))
     last_message_time: float = 0.0
     last_trigger_time: float = 0.0
     current_threshold: float = 0.85
@@ -449,23 +449,16 @@ class ProactiveEngine:
 
     # -- 触发评估 -----------------------------------------------------------
 
-    def _failure_cooldown_active(self, state: SessionState, now: float) -> bool:
-        """失败达到 ``max_retry_attempts`` 次后，冷却期内暂停重试。
-
-        达到上限之前仍会在下一轮继续尝试；成功一次后 ``failures`` 清零。
-        """
-        return (
-            state.failures >= max(1, int(self._config.max_retry_attempts))
-            and now < state.failure_cooldown_until
-        )
-
     async def tick(self) -> None:
         if not self._runtime_enabled or not self._sessions:
             return
         now = time.time()
         moment = datetime.fromtimestamp(now)
         for state in list(self._sessions.values()):
-            if self._failure_cooldown_active(state, now):
+            if (
+                state.failures >= max(1, self._config.max_retry_attempts)
+                and now < state.failure_cooldown_until
+            ):
                 continue
             try:
                 await self._evaluate(state, now, moment)
@@ -483,7 +476,7 @@ class ProactiveEngine:
         cooldown = float(getattr(rule, "cooldown_seconds", 30))
         if state.last_trigger_time and now - state.last_trigger_time < cooldown:
             return
-        if self._failure_cooldown_active(state, now):
+        if now < state.failure_cooldown_until:
             return
 
         trigger = await self._pick_trigger(state, rule, now, moment)
@@ -567,9 +560,9 @@ class ProactiveEngine:
         return None
 
     def _adjust_threshold(self, state: SessionState, rule: GroupRule | PrivateRule) -> None:
-        initial = float(getattr(rule, "activity_lower_limit", 0.85))
-        target = float(getattr(rule, "activity_upper_limit", 0.85))
-        state.current_threshold = self._scorer.adjust_threshold(state.current_threshold, initial, target)
+        lower = float(getattr(rule, "activity_lower_limit", 0.85))
+        upper = float(getattr(rule, "activity_upper_limit", 0.85))
+        state.current_threshold = self._scorer.adjust_threshold(state.current_threshold, lower, upper)
 
     def _build_prompt(
         self,
@@ -697,7 +690,7 @@ class ProactiveEngine:
                     kind=str(item["kind"]),
                     conversation_id=str(item["conversation_id"]),
                     timestamps=deque(item.get("timestamps", []), maxlen=400),
-                    messages=deque(item.get("messages", []), maxlen=1000),
+                    messages=deque(item.get("messages", []), maxlen=64),
                     last_message_time=float(item.get("last_message_time", 0.0)),
                     last_trigger_time=float(item.get("last_trigger_time", 0.0)),
                     current_threshold=float(item.get("current_threshold", 0.85)),
