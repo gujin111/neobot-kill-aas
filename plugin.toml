@@ -1,4 +1,6 @@
 name = "proactive"
+repo = "https://github.com/gujin111/neobot-kill-aas"
+branch = "main"
 version = "1.8.1"
 description = "主动发言调度（空闲 / 活跃度触发）"
 author = "ported from koishi-plugin-chatluna-proactive-trigger"
